@@ -81,6 +81,11 @@ class LatestFrameCapture:
             self.cap.release()
 
 
+
+
+# Couper ici apres
+
+
 def run(video_left: str, video_right: str | None = None, frameskip: int = 0):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA non disponible : PyTorch est installé en version CPU-only")
@@ -182,7 +187,6 @@ def run(video_left: str, video_right: str | None = None, frameskip: int = 0):
                 time.sleep(0.002)
                 continue
 
-            # On garde aussi la dernière frame brute pour éviter les trous visuels
             if raw_f1 is not None:
                 last_left_display = raw_f1
             if dual_mode and raw_f2 is not None:
@@ -204,7 +208,6 @@ def run(video_left: str, video_right: str | None = None, frameskip: int = 0):
 
                 candidate_cam = None
                 if dual_mode:
-                    # priorité à la frame la plus récente si les deux détectent
                     if found1 and found2:
                         candidate_cam = "LEFT" if ts1 >= ts2 else "RIGHT"
                     elif found1:
