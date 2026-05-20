@@ -1,0 +1,18 @@
+# modules/foot_ai/constants.py
+from pathlib import Path
+
+WINDOW_WIDTH = 800
+WINDOW_HEIGHT = 600
+
+FOCUS_WINDOW_WIDTH = 800
+FOCUS_WINDOW_HEIGHT = 600
+
+BALL_CONFIDENCE = 0.60
+FOOT_BALL_CLASS_ID = 32
+SWITCH_DELAY_SEC = 0.05
+
+DETECTION_IMAGE_SIZE = 416
+PREDICTION_CONFIDENCE = 0.25
+READ_RETRY_DELAY_SEC = 0.002
+
+MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "checkpoint_5.pt"
