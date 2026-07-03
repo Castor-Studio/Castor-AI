@@ -257,7 +257,7 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
                     ),
                 )
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
     async def _stop_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
