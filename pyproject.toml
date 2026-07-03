@@ -1,7 +1,30 @@
 [project]
-name = "castor-ia"
+name = "castostudio-ai-worker"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = []
+
+[tool.uv.workspace]
+members = [
+  "core",
+  "server",
+  "packages/football",
+  "packages/podcast",
+]
+
+[tool.uv.sources]
+castostudio-ai-core = { workspace = true }
+castostudio-ai-server = { workspace = true }
+castostudio-ai-football = { workspace = true }
+castostudio-ai-podcast = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "grpcio-tools>=1.73.0",
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
