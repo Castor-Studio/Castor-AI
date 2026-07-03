@@ -3,7 +3,12 @@ name = "castostudio-ai-podcast"
 version = "0.1.0"
 description = "Podcast AI module for CastoStudio."
 requires-python = ">=3.11"
-dependencies = ["castostudio-ai-core>=0.1.0"]
+dependencies = [
+  "castostudio-ai-core>=0.1.0",
+  "av>=18.0.0",
+  "numpy",
+  "ultralytics>=8.3.228"
+]
 
 [project.entry-points."castostudio_ai.modules"]
 podcast = "castostudio_ai_podcast:PodcastModule"
