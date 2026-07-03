@@ -55,3 +55,4 @@ desktop.ini
 # Model weights
 *.pt
 
+ai_analysis_pb2.py
