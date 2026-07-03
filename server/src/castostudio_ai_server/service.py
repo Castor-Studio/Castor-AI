@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -24,6 +25,7 @@ LOGGER = logging.getLogger(__name__)
 class _Session:
     context: SessionContext
     module: AiModule
+    sources: list[Source] | None = None
 
 
 class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
@@ -124,7 +126,17 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
                 continue
 
             if payload == "sources":
-                async for event in self._handle_sources(session, request.sources.sources):
+                session.sources = self._convert_sources(session, request.sources.sources)
+
+                event = self._status_event(
+                    session.context.session_id,
+                    ia_analysis_pb2.SESSION_STATE_READY,
+                    "Sources received. Continuous analysis started.",
+                )
+                self._log_server_event(event)
+                yield event
+
+                async for event in self._analysis_loop(session):
                     self._log_server_event(event)
                     yield event
             elif payload == "keep_alive":
@@ -184,8 +196,9 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
             message="Session ended.",
         )
 
-    async def _handle_sources(self, session: _Session, source_messages) -> AsyncIterator:
+    def _convert_sources(self, session: _Session, source_messages) -> list[Source]:
         source_messages = tuple(source_messages)
+
         LOGGER.info(
             "SourceList received session_id=%s source_count=%d scene_ids=%s metadata_counts=%s",
             session.context.session_id,
@@ -193,20 +206,8 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
             [source.scene_id for source in source_messages],
             [len(source.metadata) for source in source_messages],
         )
-        LOGGER.debug(
-            "SourceList details session_id=%s sources=%s",
-            session.context.session_id,
-            [
-                {
-                    "scene_id": source.scene_id,
-                    "label": source.label,
-                    "has_url": bool(source.url),
-                    "metadata_keys": sorted(source.metadata),
-                }
-                for source in source_messages
-            ],
-        )
-        sources = [
+
+        return [
             Source(
                 scene_id=source.scene_id,
                 url=source.url,
@@ -216,51 +217,47 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
             for source in source_messages
         ]
 
-        try:
-            decision = await session.module.analyze_sources(sources)
-        except Exception as exc:
-            LOGGER.exception(
-                "Analysis failed session_id=%s error_code=ANALYSIS_FAILED",
-                session.context.session_id,
-            )
-            yield self._error_event(
-                session.context.session_id,
-                "ANALYSIS_FAILED",
-                f"AI module failed during analysis: {exc}",
-                is_fatal=False,
-            )
+
+    async def _analysis_loop(self, session: _Session) -> AsyncIterator:
+        if session.sources is None:
             return
 
-        if decision is None:
-            LOGGER.info("Analysis completed session_id=%s decision=none", session.context.session_id)
-            yield self._status_event(
-                session.context.session_id,
-                ia_analysis_pb2.SESSION_STATE_ANALYZING,
-                "No scene switch suggested.",
-            )
-            return
+        while session.context.session_id in self._sessions:
+            try:
+                decision = await session.module.analyze_sources(session.sources)
 
-        LOGGER.info(
-            "Analysis completed session_id=%s decision_scene_id=%s confidence=%.3f",
-            session.context.session_id,
-            decision.scene_id,
-            decision.confidence,
-        )
-        LOGGER.debug(
-            "SceneDecision details session_id=%s scene_id=%s confidence=%s",
-            session.context.session_id,
-            decision.scene_id,
-            decision.confidence,
-        )
-        yield ia_analysis_pb2.ServerEvent(
-            session_id=session.context.session_id,
-            timestamp_ms=self._now_ms(),
-            event_type=ia_analysis_pb2.SERVER_EVENT_SWITCH_SUGGESTED,
-            switch_suggestion=ia_analysis_pb2.SceneSwitch(
-                scene_id=decision.scene_id,
-                confidence=decision.confidence,
-            ),
-        )
+            except Exception as exc:
+                LOGGER.exception(
+                    "Analysis failed session_id=%s error_code=ANALYSIS_FAILED",
+                    session.context.session_id,
+                )
+                yield self._error_event(
+                    session.context.session_id,
+                    "ANALYSIS_FAILED",
+                    f"AI module failed during analysis: {exc}",
+                    is_fatal=False,
+                )
+                return
+
+            if decision is not None:
+                LOGGER.info(
+                    "Analysis completed session_id=%s decision_scene_id=%s confidence=%.3f",
+                    session.context.session_id,
+                    decision.scene_id,
+                    decision.confidence,
+                )
+
+                yield ia_analysis_pb2.ServerEvent(
+                    session_id=session.context.session_id,
+                    timestamp_ms=self._now_ms(),
+                    event_type=ia_analysis_pb2.SERVER_EVENT_SWITCH_SUGGESTED,
+                    switch_suggestion=ia_analysis_pb2.SceneSwitch(
+                        scene_id=decision.scene_id,
+                        confidence=decision.confidence,
+                    ),
+                )
+
+            await asyncio.sleep(0.5)
 
     async def _stop_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
