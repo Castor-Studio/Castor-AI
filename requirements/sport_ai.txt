@@ -1,2 +1,0 @@
--r base.txt
-ultralytics==8.3.228
