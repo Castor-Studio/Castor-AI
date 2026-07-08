@@ -192,3 +192,54 @@ async def test_end_session_logs_success_and_unknown_session(caplog):
     assert second_end.success is False
     assert f"EndSession succeeded session_id={start.session_id}" in logs
     assert f"EndSession failed session_id={start.session_id} reason=unknown" in logs
+
+
+def test_podcast_module_parse_roles():
+    from castostudio_ai_podcast import PodcastModule
+    from castostudio_ai_core import Source
+
+    module = PodcastModule()
+    sources = [
+        Source(scene_id="s1", url="rtmp://...", label="Cam Hote"),
+        Source(scene_id="s2", url="rtmp://...", label="Cam Invite"),
+        Source(scene_id="s3", url="rtmp://...", label="Plan Large"),
+        Source(scene_id="s4", url="rtmp://...", label="Cam Hote Zoom"),
+    ]
+    roles = module._parse_roles(sources)
+    assert roles["host"] == "s1"
+    assert roles["guest"] == "s2"
+    assert roles["wide"] == "s3"
+    assert roles["host_zoom"] == "s4"
+
+
+def test_podcast_module_state_machine():
+    from castostudio_ai_podcast import PodcastModule
+
+    module = PodcastModule()
+    roles = {
+        "host": "s1",
+        "guest": "s2",
+        "wide": "s3",
+        "host_zoom": "s4"
+    }
+
+    # 1. Silence state - initial
+    decision = module._run_state_machine(active_speakers=[], roles=roles, now=100.0)
+    assert decision is None
+
+    # After 3 seconds of silence, should switch to wide
+    decision = module._run_state_machine(active_speakers=[], roles=roles, now=104.0)
+    assert decision == "wide"
+
+    # 2. Single speaker (host)
+    decision = module._run_state_machine(active_speakers=["host"], roles=roles, now=105.0)
+    assert decision == "host"
+
+    # 3. Monologue duration exceeded (5 seconds)
+    decision = module._run_state_machine(active_speakers=["host"], roles=roles, now=111.0)
+    assert decision == "host_zoom"
+
+    # 4. Multiple speakers (debate) -> Wide shot
+    decision = module._run_state_machine(active_speakers=["host", "guest"], roles=roles, now=112.0)
+    assert decision == "wide"
+
