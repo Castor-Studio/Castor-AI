@@ -303,7 +303,7 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
             message="Session ended.",
         )
 
-    def _convert_sources(self, session: _Session, source_messages) -> list[Source]:
+    async def _convert_sources(self, session: _Session, source_messages) -> list[Source]:
         source_messages = tuple(source_messages)
 
         LOGGER.info(
@@ -320,7 +320,7 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
             if session.client_ip != "127.0.0.1" and ("127.0.0.1" in url or "localhost" in url):
                 url = url.replace("127.0.0.1", session.client_ip).replace("localhost", session.client_ip)
                 LOGGER.info("Translated source URL for remote client: %s -> %s", source.url, url)
-            
+
             converted.append(
                 Source(
                     scene_id=source.scene_id,
@@ -328,18 +328,19 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
                     label=source.label,
                     metadata=dict(source.metadata),
                 )
+            )
 
-                yield ia_analysis_pb2.ServerEvent(
-                    session_id=session.context.session_id,
-                    timestamp_ms=self._now_ms(),
-                    event_type=ia_analysis_pb2.SERVER_EVENT_SWITCH_SUGGESTED,
-                    switch_suggestion=ia_analysis_pb2.SceneSwitch(
-                        scene_id=decision.scene_id,
-                        confidence=decision.confidence,
-                    ),
-                )
+            yield ia_analysis_pb2.ServerEvent(
+                session_id=session.context.session_id,
+                timestamp_ms=self._now_ms(),
+                event_type=ia_analysis_pb2.SERVER_EVENT_SWITCH_SUGGESTED,
+                switch_suggestion=ia_analysis_pb2.SceneSwitch(
+                    scene_id=decision.scene_id,
+                    confidence=decision.confidence,
+                ),
+            )
 
-            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.1)
 
     async def _stop_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
