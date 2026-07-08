@@ -29,5 +29,8 @@ async def serve(host: str = "0.0.0.0", port: int = 50051) -> None:
     try:
         await server.wait_for_termination()
     except asyncio.CancelledError:
-        await server.stop(grace=5)
+        LOGGER.info("Stopping gRPC server...")
+        await server.stop(grace=1)
+        LOGGER.info("gRPC server stopped.")
         raise
+
