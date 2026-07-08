@@ -196,7 +196,7 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
             message="Session ended.",
         )
 
-    async def _convert_sources(self, session: _Session, source_messages) -> list[Source]:
+    def _convert_sources(self, session: _Session, source_messages) -> list[Source]:
         source_messages = tuple(source_messages)
 
         LOGGER.info(
@@ -247,17 +247,17 @@ class IaAnalysisService(ia_analysis_pb2_grpc.IaAnalysisServiceServicer):
                     decision.confidence,
                 )
 
-            yield ia_analysis_pb2.ServerEvent(
-                session_id=session.context.session_id,
-                timestamp_ms=self._now_ms(),
-                event_type=ia_analysis_pb2.SERVER_EVENT_SWITCH_SUGGESTED,
-                switch_suggestion=ia_analysis_pb2.SceneSwitch(
-                    scene_id=decision.scene_id,
-                    confidence=decision.confidence,
-                ),
-            )
+                yield ia_analysis_pb2.ServerEvent(
+                    session_id=session.context.session_id,
+                    timestamp_ms=self._now_ms(),
+                    event_type=ia_analysis_pb2.SERVER_EVENT_SWITCH_SUGGESTED,
+                    switch_suggestion=ia_analysis_pb2.SceneSwitch(
+                        scene_id=decision.scene_id,
+                        confidence=decision.confidence,
+                    ),
+                )
 
-        await asyncio.sleep(0.1)
+            await asyncio.sleep(0.1)
 
     async def _stop_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
