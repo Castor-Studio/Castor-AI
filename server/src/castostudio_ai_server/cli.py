@@ -21,4 +21,8 @@ def main() -> None:
         parser.error(f"invalid --log-level: {args.log_level}")
 
     logging.basicConfig(level=log_level, format=LOG_FORMAT)
-    asyncio.run(serve(host=args.host, port=args.port))
+    try:
+        asyncio.run(serve(host=args.host, port=args.port))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logging.getLogger("castostudio_ai_server.server").info("Server stopped by user.")
+
