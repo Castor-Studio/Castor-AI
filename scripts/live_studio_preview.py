@@ -51,12 +51,14 @@ class VideoSourceThread:
         source_spec: str | int,
         label: str,
         is_screen: bool = False,
+        monitor_idx: int = 1,
         width: int = 1280,
         height: int = 720,
     ) -> None:
         self.source_spec = source_spec
         self.label = label
         self.is_screen = is_screen or str(source_spec).lower() in ("screen", "desktop", "share")
+        self.monitor_idx = monitor_idx
         self.width = width
         self.height = height
         self.running = False
@@ -64,7 +66,7 @@ class VideoSourceThread:
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
         self.is_connected = False
-        self.active_description = "Screen Share" if self.is_screen else f"Cam {source_spec}"
+        self.active_description = f"Screen {self.monitor_idx}" if self.is_screen else f"Cam {source_spec}"
 
     def start(self) -> None:
         self.running = True
@@ -83,9 +85,21 @@ class VideoSourceThread:
             self.is_screen = not self.is_screen
             self.is_connected = False
             self.frame = None
-            self.active_description = "Screen Share" if self.is_screen else f"Cam {self.source_spec}"
+            self.active_description = f"Screen {self.monitor_idx}" if self.is_screen else f"Cam {self.source_spec}"
             LOGGER.info("Toggled %s source mode to: %s", self.label, self.active_description)
             return self.is_screen
+
+    def cycle_monitor(self) -> int:
+        if not HAS_MSS:
+            return 1
+        with (getattr(mss, "MSS", mss.mss))() as sct:
+            m_count = len(sct.monitors)
+            if m_count <= 2:
+                return 1
+            self.monitor_idx = (self.monitor_idx % (m_count - 1)) + 1
+            self.active_description = f"Screen {self.monitor_idx}"
+            LOGGER.info("🖥️ Switched %s to monitor %d", self.label, self.monitor_idx)
+            return self.monitor_idx
 
     def get_frame(self) -> np.ndarray:
         with self.lock:
@@ -114,9 +128,11 @@ class VideoSourceThread:
             return
 
         try:
-            with mss.mss() as sct:
-                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                LOGGER.info("🖥️ Screen capture started for %s (%dx%d)", self.label, monitor["width"], monitor["height"])
+            with (getattr(mss, "MSS", mss.mss))() as sct:
+                m_count = len(sct.monitors)
+                m_idx = self.monitor_idx if self.monitor_idx < m_count else 1
+                monitor = sct.monitors[m_idx] if m_count > 1 else sct.monitors[0]
+                LOGGER.info("🖥️ Screen capture started for %s on monitor %d (%dx%d)", self.label, m_idx, monitor["width"], monitor["height"])
                 while self.running and self.is_screen:
                     raw = sct.grab(monitor)
                     frame_bgra = np.array(raw)
@@ -439,6 +455,8 @@ def compose_studio_layout(
     cur_y += 30
     cv2.putText(canvas, "[S] : Basculer Cam 2 <-> Screen Share", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
     cur_y += 25
+    cv2.putText(canvas, "[M] : Changer d'ecran (Multi-ecrans)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
+    cur_y += 25
     cv2.putText(canvas, "[Z] : Tester/Forcer le Zoom Cadrage", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 120, 255), 1)
     cur_y += 25
     cv2.putText(canvas, "[1] / [2] : Forcer Hote / Invite", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
@@ -697,6 +715,8 @@ def main() -> None:
                 break
             elif key in (ord("s"), ord("S")):  # Toggle Screen Share on Cam 2
                 guest_src.toggle_screen_share()
+            elif key in (ord("m"), ord("M")):  # Cycle monitor if multi-screen
+                guest_src.cycle_monitor()
             elif key in (ord("z"), ord("Z")):  # Force Zoom toggle
                 if "zoom" in active_scene:
                     base = active_scene.replace("_zoom", "")
