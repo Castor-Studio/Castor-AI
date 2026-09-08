@@ -12,7 +12,7 @@ from .vad import SpeechModel
 
 LOGGER = logging.getLogger(__name__)
 
-AUDIO_ROLES = ("host", "guest", "host_zoom", "guest_zoom")
+AUDIO_ROLES = ("host", "guest")
 
 
 class PodcastModule(AiModule):
