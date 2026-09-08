@@ -481,10 +481,125 @@ def scan_available_cameras(max_tested: int = 5) -> list[int]:
     return working_indices
 
 
+def scan_available_microphones() -> list[tuple[str, str]]:
+    """Lists all available audio input devices (microphones)."""
+    print(f"\n🎙️ Scanning available audio capture devices (OS: {sys.platform})...\n")
+    import subprocess
+    import re
+
+    mics = []
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            is_audio = False
+            for line in proc.stderr.splitlines():
+                if "AVFoundation audio devices:" in line:
+                    is_audio = True
+                    continue
+                if is_audio:
+                    match = re.search(r"\[(\d+)\]\s+(.*)", line)
+                    if match:
+                        idx, name = match.group(1), match.group(2).strip()
+                        mics.append((idx, name))
+                        print(f"  🎙️ Index [{idx}] -> \"{name}\"  (pass: --mic {idx})")
+        except Exception as exc:
+            print(f"  ⚠️ Error querying AVFoundation: {exc}")
+    elif sys.platform == "win32":
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            is_audio = False
+            for line in proc.stderr.splitlines():
+                if "DirectShow audio devices" in line:
+                    is_audio = True
+                    continue
+                if "DirectShow video devices" in line:
+                    is_audio = False
+                    continue
+                if is_audio and "Alternative name" not in line:
+                    match = re.search(r'"([^"]+)"', line)
+                    if match:
+                        name = match.group(1)
+                        mics.append((name, name))
+                        print(f"  🎙️ Device: \"{name}\"  (pass: --mic \"{name}\")")
+        except Exception as exc:
+            print(f"  ⚠️ Error querying DirectShow: {exc}")
+    else:
+        print("  Generic ALSA/Pulse default input")
+
+    print("")
+    return mics
+
+
+def test_microphones_live(mic1: str, mic2: str, duration: float = 5.0) -> None:
+    """Listens to mic1 and mic2 for a few seconds and displays live ASCII VU-meters."""
+    from castostudio_ai_podcast.audio import AudioStreamReader
+
+    if sys.platform == "darwin":
+        u1 = f"avfoundation::{mic1}" if str(mic1).isdigit() else str(mic1)
+        u2 = f"avfoundation::{mic2}" if str(mic2).isdigit() else str(mic2)
+    elif sys.platform == "win32":
+        u1 = str(mic1) if (str(mic1).startswith("dshow:") or str(mic1).endswith((".wav", ".mp3", ".mp4"))) else f"dshow:audio={mic1}"
+        u2 = str(mic2) if (str(mic2).startswith("dshow:") or str(mic2).endswith((".wav", ".mp3", ".mp4"))) else f"dshow:audio={mic2}"
+    else:
+        u1, u2 = str(mic1), str(mic2)
+
+    print(f"\n🔊 Testing live microphone levels for {duration} seconds (speak into your mics!)...\n")
+    print(f"  Mic 1 target: {u1}")
+    print(f"  Mic 2 target: {u2}\n")
+
+    r1 = AudioStreamReader(u1, "Mic1-Test")
+    r2 = AudioStreamReader(u2, "Mic2-Test")
+    r1.start()
+    r2.start()
+
+    start = time.time()
+    try:
+        while time.time() - start < duration:
+            db1 = r1.get_volume_db()
+            db2 = r2.get_volume_db()
+            spk1 = r1.is_speaking()
+            spk2 = r2.is_speaking()
+
+            # Generate ASCII VU-meter bar (-60dB to 0dB)
+            def bar(db: float) -> str:
+                clamped = max(-60.0, min(0.0, db))
+                units = int((clamped + 60.0) / 3.0)  # 0 to 20
+                return "█" * units + "░" * (20 - units)
+
+            b1 = bar(db1)
+            b2 = bar(db2)
+            s1_txt = "\033[1;32m[VOICE DETECTED]\033[0m" if spk1 else "[Silence]"
+            s2_txt = "\033[1;36m[VOICE DETECTED]\033[0m" if spk2 else "[Silence]"
+
+            sys.stdout.write(
+                f"\r  Mic 1: [{b1}] {db1:5.1f} dB {s1_txt:<25} | Mic 2: [{b2}] {db2:5.1f} dB {s2_txt:<25}"
+            )
+            sys.stdout.flush()
+            time.sleep(0.08)
+    finally:
+        r1.stop()
+        r2.stop()
+        print("\n\n✅ Test finished.\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--addr", default="localhost:50051", help="gRPC server address")
     parser.add_argument("--scan-cameras", action="store_true", help="Scan and list working OpenCV camera indices")
+    parser.add_argument("--scan-mics", action="store_true", help="Scan and list available audio input microphones")
+    parser.add_argument("--test-mics", action="store_true", help="Listen to mic1 & mic2 live and show ASCII VU-meters")
     parser.add_argument("--cam1", default="0", help="Camera index or path for Host. Default: 0")
     parser.add_argument("--mic1", default="1", help="Mic index/name for Host. Default: 1 (macOS) or 0 (Windows)")
     parser.add_argument("--cam2", default="1", help="Camera index, path, or 'screen' for Guest. Default: 1")
@@ -498,6 +613,14 @@ def main() -> None:
 
     if args.scan_cameras:
         scan_available_cameras()
+        return
+
+    if args.scan_mics:
+        scan_available_microphones()
+        return
+
+    if args.test_mics:
+        test_microphones_live(args.mic1, args.mic2)
         return
 
     is_screen1 = args.screen1 or str(args.cam1).lower() == "screen"
