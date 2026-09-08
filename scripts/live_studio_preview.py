@@ -43,21 +43,78 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger("live_studio_preview")
 
 
+def find_window_bbox(app_name: str) -> dict[str, int] | None:
+    """Finds bounding box for an on-screen application window matching app_name (macOS & Windows)."""
+    name_lower = app_name.lower()
+    if sys.platform == "darwin":
+        try:
+            import Quartz
+            windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+            for w in windows:
+                owner = str(w.get("kCGWindowOwnerName", "")).lower()
+                title = str(w.get("kCGWindowName", "")).lower()
+                b = w.get("kCGWindowBounds", {})
+                h = int(b.get("Height", 0))
+                wid = int(b.get("Width", 0))
+                if (name_lower in owner or name_lower in title) and h > 120 and wid > 120:
+                    return {
+                        "top": int(b["Y"]),
+                        "left": int(b["X"]),
+                        "width": wid,
+                        "height": h,
+                    }
+        except Exception:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+
+            found_rect = None
+
+            def enum_windows_callback(hwnd, extra):
+                nonlocal found_rect
+                if user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buff, length + 1)
+                        if name_lower in buff.value.lower():
+                            rect = wintypes.RECT()
+                            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                            w = rect.right - rect.left
+                            h = rect.bottom - rect.top
+                            if w > 120 and h > 120:
+                                found_rect = {"top": rect.top, "left": rect.left, "width": w, "height": h}
+                                return False
+                return True
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            user32.EnumWindows(WNDENUMPROC(enum_windows_callback), 0)
+            return found_rect
+        except Exception:
+            pass
+    return None
+
+
 class VideoSourceThread:
-    """Non-blocking threaded capture for video sources: Webcams, Screen Share, or Video Files."""
+    """Non-blocking threaded capture for video sources: Webcams, Screen Share, App Windows (Discord), or Files."""
 
     def __init__(
         self,
         source_spec: str | int,
         label: str,
         is_screen: bool = False,
+        target_window: str | None = None,
         monitor_idx: int = 1,
         width: int = 1280,
         height: int = 720,
     ) -> None:
         self.source_spec = source_spec
         self.label = label
-        self.is_screen = is_screen or str(source_spec).lower() in ("screen", "desktop", "share")
+        self.target_window = target_window or ("discord" if str(source_spec).lower() == "discord" else None)
+        self.is_screen = is_screen or self.target_window is not None or str(source_spec).lower() in ("screen", "desktop", "share")
         self.monitor_idx = monitor_idx
         self.width = width
         self.height = height
@@ -66,7 +123,12 @@ class VideoSourceThread:
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
         self.is_connected = False
-        self.active_description = f"Screen {self.monitor_idx}" if self.is_screen else f"Cam {source_spec}"
+        if self.target_window:
+            self.active_description = f"Window: {self.target_window.capitalize()}"
+        elif self.is_screen:
+            self.active_description = f"Screen {self.monitor_idx}"
+        else:
+            self.active_description = f"Cam {source_spec}"
 
     def start(self) -> None:
         self.running = True
@@ -85,7 +147,12 @@ class VideoSourceThread:
             self.is_screen = not self.is_screen
             self.is_connected = False
             self.frame = None
-            self.active_description = f"Screen {self.monitor_idx}" if self.is_screen else f"Cam {self.source_spec}"
+            if self.target_window and self.is_screen:
+                self.active_description = f"Window: {self.target_window.capitalize()}"
+            elif self.is_screen:
+                self.active_description = f"Screen {self.monitor_idx}"
+            else:
+                self.active_description = f"Cam {self.source_spec}"
             LOGGER.info("Toggled %s source mode to: %s", self.label, self.active_description)
             return self.is_screen
 
@@ -109,7 +176,7 @@ class VideoSourceThread:
         img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         img[:] = (30, 30, 35)
         text = f"{self.label} ({self.active_description})"
-        status = "Connecting..." if not self.is_connected else "No Signal"
+        status = "Waiting for window..." if self.target_window and not self.is_connected else ("Connecting..." if not self.is_connected else "No Signal")
         cv2.putText(img, text, (int(self.width * 0.08), int(self.height * 0.45)), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (200, 200, 200), 2)
         cv2.putText(img, status, (int(self.width * 0.08), int(self.height * 0.6)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 150, 255), 2)
         return img
@@ -127,14 +194,31 @@ class VideoSourceThread:
             time.sleep(1.0)
             return
 
+        last_bbox_check = 0.0
+        current_bbox = None
+
         try:
             with (getattr(mss, "MSS", mss.mss))() as sct:
-                m_count = len(sct.monitors)
-                m_idx = self.monitor_idx if self.monitor_idx < m_count else 1
-                monitor = sct.monitors[m_idx] if m_count > 1 else sct.monitors[0]
-                LOGGER.info("🖥️ Screen capture started for %s on monitor %d (%dx%d)", self.label, m_idx, monitor["width"], monitor["height"])
                 while self.running and self.is_screen:
-                    raw = sct.grab(monitor)
+                    now = time.time()
+                    # If capturing a specific application window (like Discord)
+                    if self.target_window:
+                        if now - last_bbox_check > 0.5:
+                            last_bbox_check = now
+                            current_bbox = find_window_bbox(self.target_window)
+
+                        if current_bbox:
+                            target_rect = current_bbox
+                        else:
+                            # Window not found yet, fallback to monitor
+                            m_count = len(sct.monitors)
+                            target_rect = sct.monitors[1] if m_count > 1 else sct.monitors[0]
+                    else:
+                        m_count = len(sct.monitors)
+                        m_idx = self.monitor_idx if self.monitor_idx < m_count else 1
+                        target_rect = sct.monitors[m_idx] if m_count > 1 else sct.monitors[0]
+
+                    raw = sct.grab(target_rect)
                     frame_bgra = np.array(raw)
                     frame_bgr = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
                     resized = cv2.resize(frame_bgr, (self.width, self.height))
@@ -143,7 +227,7 @@ class VideoSourceThread:
                         self.is_connected = True
                     time.sleep(0.03)  # ~30 FPS
         except Exception as exc:
-            LOGGER.warning("Screen capture error on %s: %s", self.label, exc)
+            LOGGER.warning("Screen/Window capture error on %s: %s", self.label, exc)
             time.sleep(1.0)
 
     def _open_camera(self) -> cv2.VideoCapture | None:
@@ -624,6 +708,8 @@ def main() -> None:
     parser.add_argument("--mic2", default="2", help="Mic index/name for Guest. Default: 2 (macOS) or 1 (Windows)")
     parser.add_argument("--screen1", action="store_true", help="Use Screen Share for Source 1 (Host)")
     parser.add_argument("--screen2", action="store_true", help="Use Screen Share for Source 2 (Guest)")
+    parser.add_argument("--discord", action="store_true", help="Capture Discord window directly as Source 2 (Guest)")
+    parser.add_argument("--window", default=None, help="Capture specific window by title/app (e.g. 'Discord', 'Chrome', 'Zoom')")
     parser.add_argument("--min-hold-time", type=float, default=2.0, help="Anti-flicker hold duration in seconds")
     parser.add_argument("--monologue_time", type=float, default=3.5, help="Monologue zoom threshold in seconds (default: 3.5s)")
     parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD threshold")
@@ -641,18 +727,24 @@ def main() -> None:
         test_microphones_live(args.mic1, args.mic2)
         return
 
+    target_win = "discord" if args.discord else (args.window if args.window else None)
+    if str(args.cam2).lower() == "discord":
+        target_win = "discord"
+
     is_screen1 = args.screen1 or str(args.cam1).lower() == "screen"
-    is_screen2 = args.screen2 or str(args.cam2).lower() == "screen"
+    is_screen2 = args.screen2 or args.discord or target_win is not None or str(args.cam2).lower() in ("screen", "discord")
+
+    source2_desc = f"Window: {target_win.capitalize()}" if target_win else ("Screen Share" if is_screen2 else f"Cam {args.cam2}")
 
     print("\n🎬 Starting Castor Studio Live Multi-View Preview...")
     print(f"OS: {sys.platform}")
     print(f"Source 1 (Host):  {'Screen Share' if is_screen1 else f'Cam {args.cam1}'} | Mic: {args.mic1}")
-    print(f"Source 2 (Guest): {'Screen Share' if is_screen2 else f'Cam {args.cam2}'} | Mic: {args.mic2}")
+    print(f"Source 2 (Guest): {source2_desc} | Mic: {args.mic2}")
     print(f"Monologue Zoom Trigger: {args.monologue_time}s | Anti-flicker: {args.min_hold_time}s\n")
 
     # 1. Start Video Threads
     host_src = VideoSourceThread(args.cam1, "Host", is_screen=is_screen1)
-    guest_src = VideoSourceThread(args.cam2, "Guest", is_screen=is_screen2)
+    guest_src = VideoSourceThread(args.cam2, "Guest", is_screen=is_screen2, target_window=target_win)
     host_src.start()
     guest_src.start()
 
