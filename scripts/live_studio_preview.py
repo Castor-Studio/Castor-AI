@@ -556,8 +556,62 @@ def compose_studio_layout(
 
 
 def scan_available_cameras(max_tested: int = 5) -> list[int]:
-    """Test camera indices and print which ones return valid live video frames."""
+    """Test camera indices, query friendly device names, and print which ones return live video frames."""
     print(f"\n🔍 Scanning available video capture devices (OS: {sys.platform})...")
+    import subprocess
+    import re
+
+    device_names: dict[int, str] = {}
+    if sys.platform == "win32":
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            is_video = False
+            video_idx = 0
+            for line in proc.stderr.splitlines():
+                if "DirectShow video devices" in line:
+                    is_video = True
+                    continue
+                if "DirectShow audio devices" in line:
+                    is_video = False
+                    continue
+                if is_video and "Alternative name" not in line:
+                    match = re.search(r'"([^"]+)"', line)
+                    if match:
+                        name = match.group(1)
+                        device_names[video_idx] = name
+                        video_idx += 1
+        except Exception:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            is_video = False
+            for line in proc.stderr.splitlines():
+                if "AVFoundation video devices:" in line:
+                    is_video = True
+                    continue
+                if "AVFoundation audio devices:" in line:
+                    is_video = False
+                    continue
+                if is_video:
+                    match = re.search(r"\[(\d+)\]\s+(.*)", line)
+                    if match:
+                        device_names[int(match.group(1))] = match.group(2).strip()
+        except Exception:
+            pass
+
     working_indices = []
     backend = (
         cv2.CAP_AVFOUNDATION
@@ -568,17 +622,19 @@ def scan_available_cameras(max_tested: int = 5) -> list[int]:
         cap = cv2.VideoCapture(idx, backend)
         if not cap.isOpened() and backend != cv2.CAP_ANY:
             cap = cv2.VideoCapture(idx)
+        friendly = f" \"{device_names[idx]}\"" if idx in device_names else ""
         if cap.isOpened():
             ret, frame = cap.read()
             if ret and frame is not None:
                 h, w = frame.shape[:2]
-                print(f"  ✅ Camera Index [{idx}] -> Active ({w}x{h})")
+                print(f"  ✅ Camera Index [{idx}]{friendly} -> Active ({w}x{h})")
                 working_indices.append(idx)
             else:
-                print(f"  ⚠️  Camera Index [{idx}] -> Opened but failed to capture frame")
+                print(f"  ⚠️  Camera Index [{idx}]{friendly} -> Opened but failed to capture frame")
             cap.release()
         else:
-            print(f"  ❌ Camera Index [{idx}] -> Cannot open")
+            if idx in device_names:
+                print(f"  ❌ Camera Index [{idx}]{friendly} -> Cannot open")
     print("")
     return working_indices
 
