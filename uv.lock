@@ -123,8 +123,13 @@ name = "castostudio-ai-worker"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "castostudio-ai-core" },
+    { name = "castostudio-ai-podcast" },
+    { name = "castostudio-ai-server" },
     { name = "mss" },
-    { name = "pyobjc-framework-quartz" },
+    { name = "opencv-python" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
+    { name = "ultralytics" },
 ]
 
 [package.dev-dependencies]
@@ -136,8 +141,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "castostudio-ai-core", editable = "core" },
+    { name = "castostudio-ai-podcast", editable = "packages/podcast" },
+    { name = "castostudio-ai-server", editable = "server" },
     { name = "mss", specifier = ">=10.2.0" },
-    { name = "pyobjc-framework-quartz", specifier = ">=12.2.2" },
+    { name = "opencv-python", specifier = ">=4.10.0" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'", specifier = ">=12.2.2" },
+    { name = "ultralytics", specifier = ">=8.3.0" },
 ]
 
 [package.metadata.requires-dev]

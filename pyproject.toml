@@ -3,8 +3,13 @@ name = "castostudio-ai-worker"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "castostudio-ai-core",
+    "castostudio-ai-server",
+    "castostudio-ai-podcast",
+    "ultralytics>=8.3.0",
+    "opencv-python>=4.10.0",
     "mss>=10.2.0",
-    "pyobjc-framework-quartz>=12.2.2",
+    "pyobjc-framework-quartz>=12.2.2; sys_platform == 'darwin'",
 ]
 
 [tool.uv.workspace]
