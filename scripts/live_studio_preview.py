@@ -404,13 +404,64 @@ class AIClientBridge:
                     pass
 
 
-def apply_digital_zoom(frame: np.ndarray, zoom_factor: float = 1.55) -> np.ndarray:
-    """Applies a high-quality centered digital crop/zoom for monologue focus."""
+_yolo_detector = None
+_zoom_center_ema: dict[str, tuple[int, int]] = {}
+
+
+def get_yolo_detector():
+    """Lazy loader for YOLOv8 model for smart face/person tracking zoom."""
+    global _yolo_detector
+    if _yolo_detector is False:
+        return None
+    if _yolo_detector is None:
+        try:
+            import os
+            from ultralytics import YOLO
+            if os.path.exists("yolov8n.pt"):
+                _yolo_detector = YOLO("yolov8n.pt")
+            else:
+                _yolo_detector = False
+        except Exception:
+            _yolo_detector = False
+    return _yolo_detector
+
+
+def apply_digital_zoom(frame: np.ndarray, zoom_factor: float = 1.55, track_key: str = "default") -> np.ndarray:
+    """Applies smart digital zoom centered on speaker head/face via YOLOv8, or smoothed center."""
     h, w = frame.shape[:2]
     crop_w = int(w / zoom_factor)
     crop_h = int(h / zoom_factor)
-    x1 = (w - crop_w) // 2
-    y1 = (h - crop_h) // 2
+
+    target_cx = w // 2
+    target_cy = h // 2
+
+    detector = get_yolo_detector()
+    if detector:
+        try:
+            results = detector.predict(frame, classes=[0], verbose=False, imgsz=320, conf=0.30)
+            if results and len(results[0].boxes) > 0:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                best_box = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+                bx1, by1, bx2, by2 = best_box
+                target_cx = int((bx1 + bx2) / 2)
+                # Position head/eyes around 28% from the top of the person's bounding box
+                target_cy = int(by1 + (by2 - by1) * 0.28)
+        except Exception:
+            pass
+
+    # Smooth transition with Exponential Moving Average
+    if track_key in _zoom_center_ema:
+        prev_cx, prev_cy = _zoom_center_ema[track_key]
+        center_x = int(0.75 * prev_cx + 0.25 * target_cx)
+        center_y = int(0.75 * prev_cy + 0.25 * target_cy)
+    else:
+        center_x, center_y = target_cx, target_cy
+    _zoom_center_ema[track_key] = (center_x, center_y)
+
+    # Clamp crop window within frame
+    x1 = max(0, min(w - crop_w, center_x - crop_w // 2))
+    y1 = max(0, min(h - crop_h, center_y - crop_h // 2))
+
     cropped = frame[y1 : y1 + crop_h, x1 : x1 + crop_w]
     return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
 
@@ -423,32 +474,37 @@ def compose_studio_layout(
     switch_age: float,
     status_msg: str,
     guest_label: str = "CAM 2 - INVITE",
+    frame_wide: np.ndarray | None = None,
+    wide_label: str = "CAM 3 - GRAND PLAN",
 ) -> np.ndarray:
-    """Draws a complete Studio Multi-View Dashboard with Program Out and Preview tiles."""
+    """Draws a complete Studio Multi-View Dashboard with Program Out and Preview tiles (2 or 3 cameras)."""
     canvas_w, canvas_h = 1600, 960
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     canvas[:] = (22, 22, 26)  # Dark sleek background
 
     # 1. Determine Program Out Content
-    is_host = "host" in active_scene_id or active_scene_id == "s1_host" or active_scene_id == "s1_host_zoom"
-    is_guest = "guest" in active_scene_id or active_scene_id == "s2_guest" or active_scene_id == "s2_guest_zoom"
+    is_host = "host" in active_scene_id or active_scene_id in ("s1_host", "s1_host_zoom")
+    is_guest = "guest" in active_scene_id or active_scene_id in ("s2_guest", "s2_guest_zoom")
     is_wide = "wide" in active_scene_id or active_scene_id == "s3_wide"
     is_zoom = "zoom" in active_scene_id
 
     if is_host:
-        prog_raw = apply_digital_zoom(frame_host, 1.55) if is_zoom else frame_host
-        current_role_name = "HOTE (Cam 1)" + ("  [ZOOM CADRAGE SERRÉ 1.55x]" if is_zoom else "")
+        prog_raw = apply_digital_zoom(frame_host, 1.55, track_key="host") if is_zoom else frame_host
+        current_role_name = "HOTE (Cam 1)" + ("  [ZOOM IA SERRÉ 1.55x]" if is_zoom else "")
     elif is_guest:
-        prog_raw = apply_digital_zoom(frame_guest, 1.55) if is_zoom else frame_guest
-        current_role_name = f"{guest_label}" + ("  [ZOOM CADRAGE SERRÉ 1.55x]" if is_zoom else "")
-    else:  # Wide shot / side-by-side
-        current_role_name = "PLAN LARGE / DEBAT (Split-Screen 2 Faces)"
-        h, w = frame_host.shape[:2]
-        half_w = w // 2
-        split_left = frame_host[:, half_w // 2 : half_w // 2 + half_w]
-        split_right = frame_guest[:, half_w // 2 : half_w // 2 + half_w]
-        prog_raw = np.hstack([split_left, split_right])
-        prog_raw = cv2.resize(prog_raw, (w, h))
+        prog_raw = apply_digital_zoom(frame_guest, 1.55, track_key="guest") if is_zoom else frame_guest
+        current_role_name = f"{guest_label}" + ("  [ZOOM IA SERRÉ 1.55x]" if is_zoom else "")
+    else:  # Wide shot (Grand plan)
+        if frame_wide is not None:
+            prog_raw = frame_wide
+            current_role_name = "GRAND PLAN STUDIO (Cam 3)"
+        else:
+            current_role_name = "PLAN LARGE / DEBAT (Split-Screen 2 Faces)"
+            h, w = frame_host.shape[:2]
+            half_w = w // 2
+            split_left = frame_host[:, half_w // 2 : half_w // 2 + half_w]
+            split_right = frame_guest[:, half_w // 2 : half_w // 2 + half_w]
+            prog_raw = cv2.resize(np.hstack([split_left, split_right]), (w, h))
 
     # 2. Place PROGRAM OUT (Top-Left, 1040x585)
     prog_w, prog_h = 1040, 585
@@ -456,41 +512,87 @@ def compose_studio_layout(
     prog_resized = cv2.resize(prog_raw, (prog_w, prog_h))
     canvas[prog_y : prog_y + prog_h, prog_x : prog_x + prog_w] = prog_resized
 
-    # Program Out Tally Border (Magenta if Zoom, Red if Live)
-    border_color = (255, 0, 200) if is_zoom else (0, 0, 230)
+    # Program Out Tally Border (Magenta if Zoom, Red if Live, Cyan if Wide)
+    if is_zoom:
+        border_color = (255, 0, 200)
+    elif is_wide:
+        border_color = (0, 220, 255)
+    else:
+        border_color = (0, 0, 230)
     cv2.rectangle(canvas, (prog_x - 3, prog_y - 3), (prog_x + prog_w + 3, prog_y + prog_h + 3), border_color, 4)
 
     # Program Out Top Badge
-    badge_bg = (180, 0, 160) if is_zoom else (0, 0, 200)
-    cv2.rectangle(canvas, (prog_x, prog_y), (prog_x + 360, prog_y + 40), badge_bg, -1)
-    badge_text = "● PROGRAM [ZOOM ACTIF]" if is_zoom else "● PROGRAM (DIRECT DIFFUSE)"
+    if is_zoom:
+        badge_bg = (180, 0, 160)
+        badge_text = "● PROGRAM [ZOOM IA ACTIF]"
+    elif is_wide:
+        badge_bg = (160, 120, 0)
+        badge_text = "● PROGRAM [GRAND PLAN STUDIO]"
+    else:
+        badge_bg = (0, 0, 200)
+        badge_text = "● PROGRAM (DIRECT DIFFUSE)"
+    cv2.rectangle(canvas, (prog_x, prog_y), (prog_x + 380, prog_y + 40), badge_bg, -1)
     cv2.putText(canvas, badge_text, (prog_x + 12, prog_y + 26), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
 
     # Program Out Bottom Label
     cv2.rectangle(canvas, (prog_x, prog_y + prog_h - 40), (prog_x + prog_w, prog_y + prog_h), (15, 15, 15), -1)
     cv2.putText(canvas, f"Source active : {current_role_name}", (prog_x + 15, prog_y + prog_h - 13), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 240, 255), 2)
 
-    # 3. Place MULTIVIEW (Bottom Row: Cam Hote & Cam Invite/Screen, 490x275 each)
-    thumb_w, thumb_h = 490, 275
+    # 3. Place MULTIVIEW (Bottom Row)
+    has_cam3 = frame_wide is not None
     y_thumbs = 680
 
-    # Thumb 1: Host
-    x_t1 = 30
-    t1_resized = cv2.resize(frame_host, (thumb_w, thumb_h))
-    canvas[y_thumbs : y_thumbs + thumb_h, x_t1 : x_t1 + thumb_w] = t1_resized
-    t1_border_color = (0, 0, 230) if is_host else ((0, 200, 0) if not is_wide else (80, 80, 80))
-    cv2.rectangle(canvas, (x_t1 - 2, y_thumbs - 2), (x_t1 + thumb_w + 2, y_thumbs + thumb_h + 2), t1_border_color, 3)
-    cv2.rectangle(canvas, (x_t1, y_thumbs), (x_t1 + 220, y_thumbs + 32), (20, 20, 20), -1)
-    cv2.putText(canvas, "CAM 1 - HOTE (Face)", (x_t1 + 10, y_thumbs + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    if has_cam3:
+        # 3 Tiles layout (Width ~330px each)
+        thumb_w, thumb_h = 330, 260
+        x_t1 = 30
+        x_t2 = 385
+        x_t3 = 740
 
-    # Thumb 2: Guest / Screen Share
-    x_t2 = 580
-    t2_resized = cv2.resize(frame_guest, (thumb_w, thumb_h))
-    canvas[y_thumbs : y_thumbs + thumb_h, x_t2 : x_t2 + thumb_w] = t2_resized
-    t2_border_color = (0, 0, 230) if is_guest else ((0, 200, 0) if not is_wide else (80, 80, 80))
-    cv2.rectangle(canvas, (x_t2 - 2, y_thumbs - 2), (x_t2 + thumb_w + 2, y_thumbs + thumb_h + 2), t2_border_color, 3)
-    cv2.rectangle(canvas, (x_t2, y_thumbs), (x_t2 + 280, y_thumbs + 32), (20, 20, 20), -1)
-    cv2.putText(canvas, f"CAM 2 - {guest_label}", (x_t2 + 10, y_thumbs + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+        # Tile 1: Host
+        t1_resized = cv2.resize(frame_host, (thumb_w, thumb_h))
+        canvas[y_thumbs : y_thumbs + thumb_h, x_t1 : x_t1 + thumb_w] = t1_resized
+        t1_border = (0, 0, 230) if is_host else (0, 180, 0)
+        cv2.rectangle(canvas, (x_t1 - 2, y_thumbs - 2), (x_t1 + thumb_w + 2, y_thumbs + thumb_h + 2), t1_border, 3)
+        cv2.rectangle(canvas, (x_t1, y_thumbs), (x_t1 + 200, y_thumbs + 30), (20, 20, 20), -1)
+        cv2.putText(canvas, "CAM 1 - HOTE (Face)", (x_t1 + 8, y_thumbs + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+
+        # Tile 2: Guest
+        t2_resized = cv2.resize(frame_guest, (thumb_w, thumb_h))
+        canvas[y_thumbs : y_thumbs + thumb_h, x_t2 : x_t2 + thumb_w] = t2_resized
+        t2_border = (0, 0, 230) if is_guest else (0, 180, 0)
+        cv2.rectangle(canvas, (x_t2 - 2, y_thumbs - 2), (x_t2 + thumb_w + 2, y_thumbs + thumb_h + 2), t2_border, 3)
+        cv2.rectangle(canvas, (x_t2, y_thumbs), (x_t2 + 200, y_thumbs + 30), (20, 20, 20), -1)
+        cv2.putText(canvas, f"CAM 2 - {guest_label}", (x_t2 + 8, y_thumbs + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+
+        # Tile 3: Wide Studio
+        t3_resized = cv2.resize(frame_wide, (thumb_w, thumb_h))
+        canvas[y_thumbs : y_thumbs + thumb_h, x_t3 : x_t3 + thumb_w] = t3_resized
+        t3_border = (0, 0, 230) if is_wide else (0, 180, 0)
+        cv2.rectangle(canvas, (x_t3 - 2, y_thumbs - 2), (x_t3 + thumb_w + 2, y_thumbs + thumb_h + 2), t3_border, 3)
+        cv2.rectangle(canvas, (x_t3, y_thumbs), (x_t3 + 220, y_thumbs + 30), (20, 20, 20), -1)
+        cv2.putText(canvas, f"{wide_label}", (x_t3 + 8, y_thumbs + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+    else:
+        # 2 Tiles layout (Width ~490px each)
+        thumb_w, thumb_h = 490, 260
+        x_t1 = 30
+        x_t2 = 580
+
+        # Thumb 1: Host
+        t1_resized = cv2.resize(frame_host, (thumb_w, thumb_h))
+        canvas[y_thumbs : y_thumbs + thumb_h, x_t1 : x_t1 + thumb_w] = t1_resized
+        t1_border = (0, 0, 230) if is_host else (0, 180, 0)
+        cv2.rectangle(canvas, (x_t1 - 2, y_thumbs - 2), (x_t1 + thumb_w + 2, y_thumbs + thumb_h + 2), t1_border, 3)
+        cv2.rectangle(canvas, (x_t1, y_thumbs), (x_t1 + 220, y_thumbs + 32), (20, 20, 20), -1)
+        cv2.putText(canvas, "CAM 1 - HOTE (Face)", (x_t1 + 10, y_thumbs + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+
+        # Thumb 2: Guest
+        t2_resized = cv2.resize(frame_guest, (thumb_w, thumb_h))
+        canvas[y_thumbs : y_thumbs + thumb_h, x_t2 : x_t2 + thumb_w] = t2_resized
+        t2_border = (0, 0, 230) if is_guest else (0, 180, 0)
+        cv2.rectangle(canvas, (x_t2 - 2, y_thumbs - 2), (x_t2 + thumb_w + 2, y_thumbs + thumb_h + 2), t2_border, 3)
+        cv2.rectangle(canvas, (x_t2, y_thumbs), (x_t2 + 280, y_thumbs + 32), (20, 20, 20), -1)
+        cv2.putText(canvas, f"CAM 2 - {guest_label}", (x_t2 + 10, y_thumbs + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
     # 4. Right Side: AI Control & Telemetry Dashboard
     panel_x, panel_y, panel_w, panel_h = 1100, 80, 470, 875
@@ -522,30 +624,30 @@ def compose_studio_layout(
 
     cv2.putText(canvas, "CADRAGE AUTOMATIQUE :", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 190), 1)
     cur_y += 30
-    cv2.putText(canvas, "• Hote parle -> Cadrage Hote", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+    cv2.putText(canvas, "• Hote parle -> Cadrage Hote (Cam 1)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
     cur_y += 25
-    cv2.putText(canvas, "• Invite parle -> Cadrage Invite/Screen", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+    cv2.putText(canvas, "• Invite parle -> Cadrage Invite (Cam 2)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
     cur_y += 25
-    cv2.putText(canvas, "• Monologue (>3.5s) -> ZOOM SERRÉ 1.55x", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 120, 255), 1)
+    cv2.putText(canvas, "• Monologue (>3.5s) -> ZOOM IA SERRÉ 1.55x", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 120, 255), 1)
     cur_y += 25
-    cv2.putText(canvas, "• Debat / 2 voix -> Split Plan Large", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+    cv2.putText(canvas, "• Debat / 2 voix -> GRAND PLAN (Cam 3)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
     cur_y += 25
-    cv2.putText(canvas, "• Silence (>3s) -> Split Plan Large", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+    cv2.putText(canvas, "• Silence (>3s) -> GRAND PLAN (Cam 3)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
 
     cur_y += 45
     cv2.line(canvas, (panel_x + 20, cur_y), (panel_x + panel_w - 20, cur_y), (55, 55, 65), 1)
     cur_y += 35
     cv2.putText(canvas, "RACCOURCIS CLAVIER :", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 190), 1)
     cur_y += 30
+    cv2.putText(canvas, "[1] : Forcer Hote (Cam 1)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+    cur_y += 25
+    cv2.putText(canvas, "[2] : Forcer Invite (Cam 2)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+    cur_y += 25
+    cv2.putText(canvas, "[3] / [W] : Forcer Grand Plan (Cam 3)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
+    cur_y += 25
+    cv2.putText(canvas, "[Z] : Forcer/Tester Zoom IA Visage", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 120, 255), 1)
+    cur_y += 25
     cv2.putText(canvas, "[S] : Basculer Cam 2 <-> Screen Share", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
-    cur_y += 25
-    cv2.putText(canvas, "[M] : Changer d'ecran (Multi-ecrans)", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 255), 1)
-    cur_y += 25
-    cv2.putText(canvas, "[Z] : Tester/Forcer le Zoom Cadrage", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 120, 255), 1)
-    cur_y += 25
-    cv2.putText(canvas, "[1] / [2] : Forcer Hote / Invite", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
-    cur_y += 25
-    cv2.putText(canvas, "[W] : Forcer Split Plan Large", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
     cur_y += 25
     cv2.putText(canvas, "[Q] / [ESC] : Quitter la regie", (panel_x + 25, cur_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 150, 255), 1)
 
@@ -762,6 +864,7 @@ def main() -> None:
     parser.add_argument("--mic1", default="1", help="Mic index/name for Host. Default: 1 (macOS) or 0 (Windows)")
     parser.add_argument("--cam2", default="1", help="Camera index, path, or 'screen' for Guest. Default: 1")
     parser.add_argument("--mic2", default="2", help="Mic index/name for Guest. Default: 2 (macOS) or 1 (Windows)")
+    parser.add_argument("--cam3", "--cam-wide", dest="cam3", default=None, help="Camera index or path for Wide Studio Shot (Cam 3). Optional.")
     parser.add_argument("--screen1", action="store_true", help="Use Screen Share for Source 1 (Host)")
     parser.add_argument("--screen", "--screen2", dest="screen2", action="store_true", help="Use Screen Share for Source 2 (Guest)")
     parser.add_argument("--discord", action="store_true", help="Capture Discord window directly as Source 2 (Guest)")
@@ -791,18 +894,25 @@ def main() -> None:
     is_screen2 = args.screen2 or args.discord or target_win is not None or str(args.cam2).lower() in ("screen", "discord")
 
     source2_desc = f"Window: {target_win.capitalize()}" if target_win else ("Screen Share" if is_screen2 else f"Cam {args.cam2}")
+    has_cam3 = args.cam3 is not None
 
     print("\n🎬 Starting Castor Studio Live Multi-View Preview...")
     print(f"OS: {sys.platform}")
     print(f"Source 1 (Host):  {'Screen Share' if is_screen1 else f'Cam {args.cam1}'} | Mic: {args.mic1}")
     print(f"Source 2 (Guest): {source2_desc} | Mic: {args.mic2}")
+    if has_cam3:
+        print(f"Source 3 (Wide):   Cam {args.cam3} [Grand Plan Studio]")
     print(f"Monologue Zoom Trigger: {args.monologue_time}s | Anti-flicker: {args.min_hold_time}s\n")
 
     # 1. Start Video Threads
     host_src = VideoSourceThread(args.cam1, "Host", is_screen=is_screen1)
     guest_src = VideoSourceThread(args.cam2, "Guest", is_screen=is_screen2, target_window=target_win)
+    wide_src = VideoSourceThread(args.cam3, "Studio Wide") if has_cam3 else None
+
     host_src.start()
     guest_src.start()
+    if wide_src:
+        wide_src.start()
 
     # 2. Build gRPC Sources (5 podcast scenes: Host, Guest, Wide, Zoom Host, Zoom Guest)
     if sys.platform == "darwin":
@@ -842,6 +952,7 @@ def main() -> None:
         while True:
             frame_h = host_src.get_frame()
             frame_g = guest_src.get_frame()
+            frame_w = wide_src.get_frame() if wide_src else None
             active_scene, conf, switch_time, status_msg = ai_bridge.get_state()
             switch_age = time.time() - switch_time
 
@@ -855,6 +966,8 @@ def main() -> None:
                 switch_age=switch_age,
                 status_msg=status_msg,
                 guest_label=guest_display_label,
+                frame_wide=frame_w,
+                wide_label="CAM 3 - GRAND PLAN",
             )
 
             cv2.imshow(window_name, dashboard)
@@ -876,11 +989,13 @@ def main() -> None:
                 ai_bridge.manual_override_scene("s1_host")
             elif key == ord("2"):
                 ai_bridge.manual_override_scene("s2_guest")
-            elif key in (ord("w"), ord("W")):
+            elif key in (ord("3"), ord("w"), ord("W")):
                 ai_bridge.manual_override_scene("s3_wide")
     finally:
         host_src.stop()
         guest_src.stop()
+        if wide_src:
+            wide_src.stop()
         ai_bridge.stop()
         cv2.destroyAllWindows()
         print("Studio preview closed cleanly.")
