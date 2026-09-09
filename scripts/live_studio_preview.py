@@ -763,7 +763,7 @@ def main() -> None:
     parser.add_argument("--cam2", default="1", help="Camera index, path, or 'screen' for Guest. Default: 1")
     parser.add_argument("--mic2", default="2", help="Mic index/name for Guest. Default: 2 (macOS) or 1 (Windows)")
     parser.add_argument("--screen1", action="store_true", help="Use Screen Share for Source 1 (Host)")
-    parser.add_argument("--screen2", action="store_true", help="Use Screen Share for Source 2 (Guest)")
+    parser.add_argument("--screen", "--screen2", dest="screen2", action="store_true", help="Use Screen Share for Source 2 (Guest)")
     parser.add_argument("--discord", action="store_true", help="Capture Discord window directly as Source 2 (Guest)")
     parser.add_argument("--window", default=None, help="Capture specific window by title/app (e.g. 'Discord', 'Chrome', 'Zoom')")
     parser.add_argument("--min-hold-time", type=float, default=2.0, help="Anti-flicker hold duration in seconds")
