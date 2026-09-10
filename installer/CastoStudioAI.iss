@@ -40,6 +40,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "..\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; \
     Excludes: ".git\*,.venv\*,__pycache__\*,*.pyc,installer\*,.pytest_cache\*"
 
+; Version Python verrouillée à la racine (garantie pour uv)
+Source: "..\.python-version"; DestDir: "{app}"; Flags: ignoreversion
+
 ; Exécutable uv embarqué (binaire officiel x86_64 pour Windows)
 Source: "dist\uv.exe"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -50,7 +53,9 @@ Source: "install_steps.bat"; DestDir: "{tmp}"; Flags: dontcopy
 
 [Run]
 ; Configuration automatique du Pare-feu Windows Defender pour les communications locales
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""CastoStudio AI Worker (gRPC 50051)"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""CastoStudio AI Worker (gRPC 50051)"" dir=in action=allow protocol=TCP localport=50051 profile=any"; Flags: runhidden; StatusMsg: "Configuration du pare-feu Windows pour le serveur IA (port 50051)..."
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""CastoStudio MediaMTX Streaming (RTMP 1935)"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""CastoStudio MediaMTX Streaming (RTMP 1935)"" dir=in action=allow protocol=TCP localport=1935 profile=any"; Flags: runhidden; StatusMsg: "Configuration du pare-feu Windows pour le streaming local (port 1935)..."
 
 [UninstallRun]
@@ -82,9 +87,16 @@ const
   ORANGE_COLOR = $00008CFF; // Dark Orange
   GREEN_COLOR  = $00228B22; // Forest Green
 
+function GetPowerShellPath(): string;
+begin
+  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(Result) then
+    Result := 'powershell.exe';
+end;
+
 procedure RunResourceCheck();
 var
-  ScriptPath, IniPath, JsonPath: string;
+  ScriptPath, IniPath, JsonPath, PsExe: string;
   ResultCode: Integer;
 begin
   ScriptPath := ExpandConstant('{tmp}\check_resources.ps1');
@@ -93,9 +105,10 @@ begin
   JsonPath := ExpandConstant('{tmp}\resource_report.json');
   ResourceIniFile := IniPath;
   ResourceJsonFile := JsonPath;
+  PsExe := GetPowerShellPath();
 
   // Exécution native PowerShell — aucun binaire compilé suspect
-  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -Ini "' + IniPath + '" -Out "' + JsonPath + '"',
+  Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -Ini "' + IniPath + '" -Out "' + JsonPath + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
@@ -229,20 +242,22 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  InstallBat, InstallLog, ScriptPath, ConfirmedArg: string;
+  InstallBat, InstallLog, ScriptPath, ConfirmedArg, CmdExe, PsExe: string;
   ResultCode: Integer;
   InstallOk: Boolean;
 begin
   if CurStep = ssPostInstall then
   begin
-    // 1. Installation des dépendances IA via le script batch (visible pour l'utilisateur)
+    // 1. Installation des dépendances IA via cmd.exe /c install_steps.bat
     InstallLog := ExpandConstant('{app}\install.log');
     InstallBat := ExpandConstant('{tmp}\install_steps.bat');
     ExtractTemporaryFile('install_steps.bat');
+    CmdExe := ExpandConstant('{cmd}');
 
     WizardForm.StatusLabel.Caption := 'Installation des composants IA et de PyTorch (veuillez patienter)...';
-    // Lancement avec fenêtre visible pour que l'utilisateur voit la progression en direct
-    InstallOk := Exec(InstallBat, '"' + ExpandConstant('{app}') + '" "' + InstallLog + '"',
+    
+    // Lancement avec cmd.exe /c pour garantir l'exécution du .bat sous toutes versions de Windows
+    InstallOk := Exec(CmdExe, '/c ""' + InstallBat + '" "' + ExpandConstant('{app}') + '" "' + InstallLog + '""',
       '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 
     if not InstallOk then
@@ -257,12 +272,13 @@ begin
     // 2. Ecriture du fichier de statut %ProgramData%\CastoStudio\ai_status.json
     ScriptPath := ExpandConstant('{tmp}\write_status.ps1');
     ExtractTemporaryFile('write_status.ps1');
+    PsExe := GetPowerShellPath();
     if UserConfirmedOverride then
       ConfirmedArg := 'true'
     else
       ConfirmedArg := 'false';
 
-    Exec('powershell.exe',
+    Exec(PsExe,
       '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -Report "' + ResourceJsonFile + '" -Confirmed ' + ConfirmedArg + ' -InstallDir "' + ExpandConstant('{app}') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;

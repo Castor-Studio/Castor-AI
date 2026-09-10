@@ -25,7 +25,8 @@ Write-Host "========================================================" -Foregroun
 Write-Host "  CastoStudio AI — Preparation du build de l'installateur" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
-$distDir = "installer\dist"
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "installer" }
+$distDir = Join-Path $scriptDir "dist"
 $uvTarget = Join-Path $distDir "uv.exe"
 
 if (-not (Test-Path $distDir)) {
@@ -34,7 +35,7 @@ if (-not (Test-Path $distDir)) {
 
 if (-not (Test-Path $uvTarget)) {
     Write-Host "--> Telechargement de uv.exe (x86_64 Windows msvc)..." -ForegroundColor Yellow
-    $buildDir = "installer\build"
+    $buildDir = Join-Path $scriptDir "build"
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
     $uvZip = Join-Path $buildDir "uv.zip"
     
