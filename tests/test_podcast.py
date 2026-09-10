@@ -111,6 +111,9 @@ def test_state_machine_ticks_through_hold_window(monkeypatch):
     module = PodcastModule()
     module._min_hold_time = 6.0
     module._monologue_time = 2.0
+    # This test is about hold/monologue timing, not the backchannel filter -
+    # disable the latter so speech confirms instantly, as before its addition.
+    module._min_speech_confirm_ms = 0
 
     host = Source(scene_id="s-host", url="rtmp://invalid/host", label="Cam Hote")
     guest = Source(scene_id="s-guest", url="rtmp://invalid/guest", label="Cam Invite")

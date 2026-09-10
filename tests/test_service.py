@@ -260,3 +260,85 @@ def test_podcast_module_state_machine():
     decision = module._run_state_machine(active_speakers=["host", "guest"], roles=roles, now=112.0)
     assert decision == "wide"
 
+
+def test_podcast_module_parse_roles_panel_with_extra_guests():
+    """3+ participant panels must resolve to distinct guestN roles instead
+    of every non-host camera collapsing into a single "guest"."""
+    from castostudio_ai_podcast import PodcastModule
+    from castostudio_ai_core import Source
+
+    module = PodcastModule()
+    sources = [
+        Source(scene_id="s1", url="rtmp://...", label="Cam Hote"),
+        Source(scene_id="s2", url="rtmp://...", label="Cam Invite 1"),
+        Source(scene_id="s3", url="rtmp://...", label="Cam Invite 2"),
+        Source(scene_id="s4", url="rtmp://...", label="Cam Invite 3"),
+        Source(scene_id="s5", url="rtmp://...", label="Plan Large"),
+    ]
+    roles = module._parse_roles(sources)
+    assert roles["host"] == "s1"
+    assert roles["guest"] == "s2"
+    assert roles["guest2"] == "s3"
+    assert roles["guest3"] == "s4"
+    assert roles["wide"] == "s5"
+
+
+def test_podcast_module_parse_roles_unlabeled_extra_cameras_become_guests():
+    """Cameras that don't match any known naming pattern still get a
+    dedicated speaker role (guestN) instead of being silently dropped."""
+    from castostudio_ai_podcast import PodcastModule
+    from castostudio_ai_core import Source
+
+    module = PodcastModule()
+    sources = [
+        Source(scene_id="s1", url="rtmp://...", label="Cam Hote"),
+        Source(scene_id="s2", url="rtmp://...", label="Cam Invite"),
+        Source(scene_id="s3", url="rtmp://...", label="Camera 4"),
+        Source(scene_id="s4", url="rtmp://...", label="Camera 5"),
+    ]
+    roles = module._parse_roles(sources)
+    assert roles["host"] == "s1"
+    assert roles["guest"] == "s2"
+    assert {roles.get("guest2"), roles.get("guest3")} == {"s3", "s4"}
+
+
+def test_podcast_module_state_machine_three_way_panel_debate():
+    """A 3-participant panel must still cut to wide when 2+ speak at once,
+    generalizing the old host/guest-only debate detection."""
+    from castostudio_ai_podcast import PodcastModule
+
+    module = PodcastModule()
+    roles = {"host": "s1", "guest": "s2", "guest2": "s3", "wide": "s4"}
+
+    decision = module._run_state_machine(active_speakers=["guest2"], roles=roles, now=100.0)
+    assert decision == "guest2"
+
+    decision = module._run_state_machine(
+        active_speakers=["host", "guest2"], roles=roles, now=101.0
+    )
+    assert decision == "wide"
+
+
+def test_podcast_module_confirm_speakers_filters_short_backchannel():
+    """A brief "mm-hmm"/laugh below min_speech_confirm_ms must not count as
+    a real speaker turn, so it can't flip focus or trigger debate mode."""
+    from castostudio_ai_podcast import PodcastModule
+
+    module = PodcastModule()
+    module._min_speech_confirm_ms = 300
+
+    # t=0.0: host and guest both start speaking at the same instant -
+    # neither has been sustained long enough yet.
+    confirmed = module._confirm_speakers(["host", "guest"], now=0.0)
+    assert confirmed == []
+
+    # t=0.1: guest's blip is already over (backchannel), host keeps going -
+    # guest never crosses the threshold, so it's filtered out entirely.
+    confirmed = module._confirm_speakers(["host"], now=0.1)
+    assert confirmed == []
+
+    # t=0.35: host has now been continuously speaking for 350ms (>=300ms) -
+    # confirmed as a real turn.
+    confirmed = module._confirm_speakers(["host"], now=0.35)
+    assert confirmed == ["host"]
+
