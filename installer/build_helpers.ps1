@@ -61,6 +61,8 @@ if ($Offline) {
     Write-Host "--> Cache hors-ligne pret dans $cacheDir" -ForegroundColor Green
 }
 
-Write-Host "`nPret ! Vous pouvez maintenant compiler l'installateur :" -ForegroundColor Green
+Write-Host ""
+Write-Host "Pret ! Vous pouvez maintenant compiler l'installateur :" -ForegroundColor Green
 Write-Host "  iscc installer\CastoStudioAI.iss" -ForegroundColor White
-Write-Host "Le fichier de sortie sera genere dans installer\output\CastoStudioAI-Setup.exe`n"
+Write-Host "Le fichier de sortie sera genere dans installer\output\CastoStudioAI-Setup.exe"
+Write-Host ""
