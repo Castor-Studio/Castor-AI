@@ -70,6 +70,8 @@ class PodcastModule(AiModule):
         self._cross_gating_threshold_db = 5.0
         self._debate_confirm_ms = 0
         self._silence_hold_time = 3.0
+        self._ping_pong_threshold = 0
+        self._ping_pong_window_sec = 6.0
 
         # Role cache: recomputed only when the (scene_id, label) set changes,
         # so source-list reordering between cycles can't flip role assignment
@@ -84,6 +86,7 @@ class PodcastModule(AiModule):
         self._last_switch_time = 0.0
         self._speaker_active_since: dict[str, float] = {}
         self._last_active_speaker: str | None = None
+        self._speaker_switches: list[tuple[float, str]] = []
         self._silence_start_time: float | None = None
         self._debate_start_time: float | None = None
         self._last_diag_log_time = 0.0
@@ -114,12 +117,18 @@ class PodcastModule(AiModule):
         self._silence_hold_time = float(
             context.config.get("silence_hold_time", 3.0)
         )
+        self._ping_pong_threshold = int(
+            context.config.get("ping_pong_threshold", 0)
+        )
+        self._ping_pong_window_sec = float(
+            context.config.get("ping_pong_window_sec", 6.0)
+        )
 
         LOGGER.info(
             "[PodcastModule] config: min_hold_time=%.1f monologue_time=%.1f "
             "vad_threshold=%.2f min_silence_duration_ms=%d speech_pad_ms=%d "
             "min_speech_confirm_ms=%d cross_gating_threshold_db=%.1f "
-            "debate_confirm_ms=%d silence_hold_time=%.1f",
+            "debate_confirm_ms=%d silence_hold_time=%.1f ping_pong_threshold=%d",
             self._min_hold_time,
             self._monologue_time,
             self._vad_threshold,
@@ -129,6 +138,7 @@ class PodcastModule(AiModule):
             self._cross_gating_threshold_db,
             self._debate_confirm_ms,
             self._silence_hold_time,
+            self._ping_pong_threshold,
         )
 
         # Load the VAD model now, off the event loop, so the first analysis
@@ -176,10 +186,19 @@ class PodcastModule(AiModule):
                     except (ValueError, TypeError):
                         pass
 
+            # Visual presence check: if camera metadata explicitly indicates an empty chair,
+            # veto the audio trigger to prevent cutting to an empty room.
+            is_face_absent = False
+            if source and source.metadata:
+                face_meta = source.metadata.get("face_detected", "").lower()
+                person_meta = source.metadata.get("person_detected", "").lower()
+                if face_meta in ("false", "0") or person_meta in ("false", "0"):
+                    is_face_absent = True
+
             volumes[role] = vol
             is_speaking_audio = reader.is_speaking() if reader else False
 
-            if is_speaking_meta or is_speaking_audio:
+            if (is_speaking_meta or is_speaking_audio) and not is_face_absent:
                 active_speakers.append(role)
 
         # 4. Cross-gating: filter out mic bleed between adjacent microphones
@@ -438,9 +457,19 @@ class PodcastModule(AiModule):
         speaker = normalized_speakers[0]
 
         if speaker != self._last_active_speaker:
+            if self._last_active_speaker is not None:
+                self._speaker_switches.append((now, speaker))
+                cutoff = now - self._ping_pong_window_sec
+                self._speaker_switches = [s for s in self._speaker_switches if s[0] >= cutoff]
+
             self._speaker_active_since.clear()
             self._speaker_active_since[speaker] = now
             self._last_active_speaker = speaker
+
+        # Ping-pong governor: if speakers alternate too rapidly in a short window,
+        # cut to wide shot to keep broadcast steady
+        if self._ping_pong_threshold > 0 and len(self._speaker_switches) >= self._ping_pong_threshold:
+            return "wide"
 
         active_duration = now - self._speaker_active_since.get(speaker, now)
 
