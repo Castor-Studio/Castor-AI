@@ -869,9 +869,13 @@ def main() -> None:
     parser.add_argument("--screen", "--screen2", dest="screen2", action="store_true", help="Use Screen Share for Source 2 (Guest)")
     parser.add_argument("--discord", action="store_true", help="Capture Discord window directly as Source 2 (Guest)")
     parser.add_argument("--window", default=None, help="Capture specific window by title/app (e.g. 'Discord', 'Chrome', 'Zoom')")
-    parser.add_argument("--min-hold-time", type=float, default=2.0, help="Anti-flicker hold duration in seconds")
-    parser.add_argument("--monologue_time", type=float, default=3.5, help="Monologue zoom threshold in seconds (default: 3.5s)")
+    parser.add_argument("--min-hold-time", type=float, default=2.5, help="Anti-flicker hold duration in seconds (default: 2.5s)")
+    parser.add_argument("--monologue_time", type=float, default=4.0, help="Monologue zoom threshold in seconds (default: 4.0s)")
     parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD threshold")
+    parser.add_argument("--cross-gating-db", type=float, default=5.0, help="Acoustic bleed filter threshold in dB (default: 5.0 dB)")
+    parser.add_argument("--debate-confirm-ms", type=int, default=600, help="Simultaneous speech confirm before Wide shot in ms (default: 600ms)")
+    parser.add_argument("--silence-hold-time", type=float, default=4.5, help="Silence hold duration before Wide shot in seconds (default: 4.5s)")
+    parser.add_argument("--speech-confirm-ms", type=int, default=200, help="Speech confirmation duration in ms (default: 200ms)")
     args = parser.parse_args()
 
     if args.scan_cameras:
@@ -938,6 +942,10 @@ def main() -> None:
         "min_hold_time": str(args.min_hold_time),
         "monologue_time": str(args.monologue_time),
         "vad_threshold": str(args.vad_threshold),
+        "cross_gating_threshold_db": str(args.cross_gating_db),
+        "debate_confirm_ms": str(args.debate_confirm_ms),
+        "silence_hold_time": str(args.silence_hold_time),
+        "min_speech_confirm_ms": str(args.speech_confirm_ms),
     }
 
     # 3. Start AI Client Bridge
