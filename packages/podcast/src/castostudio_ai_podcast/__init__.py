@@ -61,12 +61,15 @@ class PodcastModule(AiModule):
         self._audio_readers: dict[str, AudioStreamReader] = {}
 
         # Configuration
-        self._min_hold_time = 3.0
+        self._min_hold_time = 2.5
         self._monologue_time = 5.0
         self._vad_threshold = 0.5
         self._min_silence_duration_ms = 400
         self._speech_pad_ms = 100
-        self._min_speech_confirm_ms = 350
+        self._min_speech_confirm_ms = 250
+        self._cross_gating_threshold_db = 5.0
+        self._debate_confirm_ms = 0
+        self._silence_hold_time = 3.0
 
         # Role cache: recomputed only when the (scene_id, label) set changes,
         # so source-list reordering between cycles can't flip role assignment
@@ -82,6 +85,7 @@ class PodcastModule(AiModule):
         self._speaker_active_since: dict[str, float] = {}
         self._last_active_speaker: str | None = None
         self._silence_start_time: float | None = None
+        self._debate_start_time: float | None = None
         self._last_diag_log_time = 0.0
 
         # Backchannel filter: tracks how long each role has been continuously
@@ -91,7 +95,7 @@ class PodcastModule(AiModule):
 
     async def start(self, context: SessionContext) -> None:
         # Configuration
-        self._min_hold_time = float(context.config.get("min_hold_time", 3.0))
+        self._min_hold_time = float(context.config.get("min_hold_time", 2.5))
         self._monologue_time = float(context.config.get("monologue_time", 5.0))
         self._vad_threshold = float(context.config.get("vad_threshold", 0.5))
         self._min_silence_duration_ms = int(
@@ -99,19 +103,32 @@ class PodcastModule(AiModule):
         )
         self._speech_pad_ms = int(context.config.get("speech_pad_ms", 100))
         self._min_speech_confirm_ms = int(
-            context.config.get("min_speech_confirm_ms", 350)
+            context.config.get("min_speech_confirm_ms", 250)
+        )
+        self._cross_gating_threshold_db = float(
+            context.config.get("cross_gating_threshold_db", 5.0)
+        )
+        self._debate_confirm_ms = int(
+            context.config.get("debate_confirm_ms", 0)
+        )
+        self._silence_hold_time = float(
+            context.config.get("silence_hold_time", 3.0)
         )
 
         LOGGER.info(
             "[PodcastModule] config: min_hold_time=%.1f monologue_time=%.1f "
             "vad_threshold=%.2f min_silence_duration_ms=%d speech_pad_ms=%d "
-            "min_speech_confirm_ms=%d",
+            "min_speech_confirm_ms=%d cross_gating_threshold_db=%.1f "
+            "debate_confirm_ms=%d silence_hold_time=%.1f",
             self._min_hold_time,
             self._monologue_time,
             self._vad_threshold,
             self._min_silence_duration_ms,
             self._speech_pad_ms,
             self._min_speech_confirm_ms,
+            self._cross_gating_threshold_db,
+            self._debate_confirm_ms,
+            self._silence_hold_time,
         )
 
         # Load the VAD model now, off the event loop, so the first analysis
@@ -138,44 +155,49 @@ class PodcastModule(AiModule):
         active_speakers = []
         volumes = {}
 
-        for role, reader in self._audio_readers.items():
-            scene_id = roles.get(role)
-            source = next((s for s in sources if s.scene_id == scene_id), None)
+        for role, scene_id in roles.items():
+            if not _is_speaker_role(role):
+                continue
 
+            source = next((s for s in sources if s.scene_id == scene_id), None)
+            reader = self._audio_readers.get(role)
+
+            vol = reader.get_volume_db() if reader else -100.0
             is_speaking_meta = False
+
             if source and source.metadata:
                 is_speaking_str = source.metadata.get("is_speaking", "").lower()
                 active_speaker_str = source.metadata.get("active_speaker", "").lower()
                 if is_speaking_str == "true" or active_speaker_str == "true":
                     is_speaking_meta = True
+                if "volume_db" in source.metadata:
+                    try:
+                        vol = float(source.metadata["volume_db"])
+                    except (ValueError, TypeError):
+                        pass
 
-            volumes[role] = reader.get_volume_db()
+            volumes[role] = vol
+            is_speaking_audio = reader.is_speaking() if reader else False
 
-            if is_speaking_meta or reader.is_speaking():
+            if is_speaking_meta or is_speaking_audio:
                 active_speakers.append(role)
 
-        # 4. Backchannel filter: a role only counts as "speaking" once it's
-        # been continuously active for min_speech_confirm_ms, so a brief
-        # "mm-hmm"/laugh above the VAD threshold doesn't steal focus or
-        # trigger debate mode on its own (common in real panel/pro podcasts,
-        # which interrupt/acknowledge far more than a scripted 1-on-1).
-        confirmed_speakers = self._confirm_speakers(active_speakers, now)
+        # 4. Cross-gating: filter out mic bleed between adjacent microphones
+        gated_speakers = self._apply_cross_gating(active_speakers, volumes)
 
-        # 5. State machine ticks every cycle, even while a switch is being
-        # held back below. It must see every cycle to keep its internal
-        # timers (silence duration, monologue duration) accurate — skipping
-        # ticks during the hold window used to freeze that clock, so the
-        # decision made right as the hold expired was driven by whatever
-        # single noisy sample happened to land at that instant instead of
-        # the real sustained state.
+        # 5. Backchannel filter: confirm sustained speech
+        confirmed_speakers = self._confirm_speakers(gated_speakers, now)
+
+        # 6. State machine ticks every cycle
         target_role = self._run_state_machine(confirmed_speakers, roles, now)
 
         if now - self._last_diag_log_time >= 1.0:
             self._last_diag_log_time = now
             LOGGER.info(
-                "[PodcastModule] diag: active_speakers=%s confirmed_speakers=%s volumes=%s "
+                "[PodcastModule] diag: active_speakers=%s gated=%s confirmed=%s volumes=%s "
                 "state_machine_target=%s current_scene=%s hold_remaining=%.1f",
                 active_speakers,
+                gated_speakers,
                 confirmed_speakers,
                 {role: round(db, 1) for role, db in volumes.items()},
                 target_role,
@@ -195,7 +217,7 @@ class PodcastModule(AiModule):
         if target_scene_id == self._current_scene_id:
             return None
 
-        # 6. Anti-flicker guard: gate emitting the switch, not tracking it.
+        # 7. Anti-flicker guard: gate emitting the switch, not tracking it.
         if self._current_scene_id is not None and (now - self._last_switch_time < self._min_hold_time):
             return None
 
@@ -319,14 +341,38 @@ class PodcastModule(AiModule):
                 reader.start()
                 self._audio_readers[role] = reader
 
+    def _apply_cross_gating(self, active_speakers: list[str], volumes: dict[str, float]) -> list[str]:
+        """Filters out acoustic mic bleed (diaphonie) in real time.
+        When multiple microphones trigger voice activity, compares relative volume levels.
+        Any speaker whose volume is at least `cross_gating_threshold_db` lower than the
+        loudest active speaker is discarded as room bleed from adjacent capsules.
+        """
+        if len(active_speakers) <= 1:
+            return active_speakers
+
+        speaker_vols = {r: volumes.get(r, -100.0) for r in active_speakers}
+        max_role = max(speaker_vols, key=speaker_vols.get)
+        max_vol = speaker_vols[max_role]
+
+        gated = []
+        for role in active_speakers:
+            vol = speaker_vols[role]
+            if max_vol - vol < self._cross_gating_threshold_db:
+                gated.append(role)
+            else:
+                LOGGER.debug(
+                    "[PodcastModule] Cross-gated bleed: %s (%.1f dB) discarded vs %s (%.1f dB)",
+                    role,
+                    vol,
+                    max_role,
+                    max_vol,
+                )
+        return gated
+
     def _confirm_speakers(self, raw_active_speakers: list[str], now: float) -> list[str]:
-        """Filters `raw_active_speakers` (this cycle's instantaneous VAD/
-        metadata signal) down to roles that have been continuously speaking
-        for at least `_min_speech_confirm_ms`. Without this, a single
-        "mm-hmm" or a brief laugh above the VAD threshold counts as a full
-        speaker turn — on a professional podcast where people interrupt and
-        acknowledge constantly, that flickers debate mode and steals focus
-        on every blip.
+        """Filters `raw_active_speakers` down to roles that have been continuously
+        speaking for at least `_min_speech_confirm_ms`. Without this, a single
+        "mm-hmm" or a brief laugh above the VAD threshold steals focus.
         """
         raw_set = set(raw_active_speakers)
 
@@ -345,34 +391,50 @@ class PodcastModule(AiModule):
         ]
 
     def _run_state_machine(self, active_speakers: list[str], roles: dict[str, str], now: float) -> str | None:
-        # `active_speakers` is already resolved to canonical speaker roles
-        # ("host", "guest", "guest2", ...) and backchannel-filtered by the
-        # caller — generalized from the old host/guest binary so panels with
-        # 3+ participants get their own roles instead of collapsing into
-        # "guest".
         normalized_speakers = sorted(set(active_speakers))
 
-        # Case 1: Silence
+        # Case 1: Silence / Natural Pause
         if not normalized_speakers:
+            self._debate_start_time = None
             if self._silence_start_time is None:
                 self._silence_start_time = now
 
-            if now - self._silence_start_time >= 3.0:
+            # Generous silence before falling back to wide establishing shot
+            if now - self._silence_start_time >= self._silence_hold_time:
                 self._speaker_active_since.clear()
                 self._last_active_speaker = None
                 return "wide"
+
+            # Natural pause: retain current speaker (or monologue zoom) without twitching
+            if self._last_active_speaker is not None:
+                has_zoom = f"{self._last_active_speaker}_zoom" in roles
+                active_duration = now - self._speaker_active_since.get(self._last_active_speaker, now)
+                if has_zoom and active_duration >= self._monologue_time:
+                    return f"{self._last_active_speaker}_zoom"
+                return self._last_active_speaker
 
             return None
 
         self._silence_start_time = None
 
-        # Case 2: Debate / Multiple speakers
+        # Case 2: Debate / Multiple sustained speakers
         if len(normalized_speakers) > 1:
-            self._speaker_active_since.clear()
-            self._last_active_speaker = None
-            return "wide"
+            if self._debate_start_time is None:
+                self._debate_start_time = now
+
+            # Require debate to be sustained before cutting to wide shot
+            if now - self._debate_start_time >= (self._debate_confirm_ms / 1000.0):
+                self._speaker_active_since.clear()
+                self._last_active_speaker = None
+                return "wide"
+
+            # While debate is not yet confirmed, hold on the previous speaker if part of debate
+            if self._last_active_speaker in normalized_speakers:
+                return self._last_active_speaker
+            return normalized_speakers[0]
 
         # Case 3: Single active speaker
+        self._debate_start_time = None
         speaker = normalized_speakers[0]
 
         if speaker != self._last_active_speaker:
