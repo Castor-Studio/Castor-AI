@@ -1,18 +1,18 @@
 <#
 .SYNOPSIS
-    Détecte les capacités de la machine locale pour faire tourner CastoStudio AI
-    en temps réel (gRPC + YOLOv8 + torch) et calcule un score de compatibilité.
+    Detects local machine capabilities to run CastoStudio AI in real-time
+    (gRPC + YOLOv8 + torch) and computes a compatibility score.
 
 .DESCRIPTION
-    Script PowerShell natif (compatible Windows 10/11 PowerShell 5.1 et 7+).
-    Remplace les exécutables PyInstaller pour éliminer les faux-positifs antivirus.
-    Génère un fichier INI pour Inno Setup et un fichier JSON complet de rapport.
+    Native PowerShell script (compatible with Windows 10/11 PowerShell 5.1 and 7+).
+    Replaces PyInstaller executables to prevent antivirus false positives.
+    Generates an INI file for Inno Setup and a complete JSON report file.
 
 .PARAMETER Ini
-    Chemin du fichier INI de sortie (lu par GetIniString dans Inno Setup).
+    Path to output INI file (read by GetIniString in Inno Setup).
 
 .PARAMETER Out
-    Chemin du fichier JSON de sortie de rapport.
+    Path to output JSON report file.
 #>
 
 param(
@@ -22,7 +22,7 @@ param(
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Specs recommandées vs minimales
+# Recommended vs minimum specs
 $CPU_MIN = 4; $CPU_REC = 8
 $RAM_MIN = 8.0; $RAM_REC = 16.0
 $GPU_VRAM_MIN = 0.0; $GPU_VRAM_REC = 6.0
@@ -31,7 +31,7 @@ $WEIGHT_CPU = 0.30
 $WEIGHT_RAM = 0.30
 $WEIGHT_GPU = 0.40
 
-# 1. Détection CPU
+# 1. CPU Detection
 $cpuCores = [System.Environment]::ProcessorCount
 if (-not $cpuCores -or $cpuCores -lt 1) {
     try {
@@ -41,7 +41,7 @@ if (-not $cpuCores -or $cpuCores -lt 1) {
     }
 }
 
-# 2. Détection RAM (en Go)
+# 2. RAM Detection (in GB)
 $ramGb = 8.0
 try {
     $compSys = Get-CimInstance Win32_ComputerSystem
@@ -52,11 +52,11 @@ try {
     $ramGb = 8.0
 }
 
-# 3. Détection GPU & VRAM
+# 3. GPU & VRAM Detection
 $gpuName = ""
 $gpuVramGb = 0.0
 
-# Essayer nvidia-smi en premier (plus précis pour VRAM NVIDIA)
+# Try nvidia-smi first (more accurate for NVIDIA VRAM)
 try {
     $smiOut = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null
     if ($smiOut) {
@@ -70,7 +70,7 @@ try {
     }
 } catch {}
 
-# Fallback WMI / CIM si nvidia-smi absent
+# Fallback to WMI / CIM if nvidia-smi is unavailable
 if (-not $gpuName) {
     try {
         $gpus = Get-CimInstance Win32_VideoController
@@ -81,7 +81,7 @@ if (-not $gpuName) {
             if ($adapterRam -and $adapterRam -gt 0) {
                 $vram = [Math]::Round([double]$adapterRam / 1GB, 1)
             }
-            # Préférer NVIDIA ou AMD
+            # Prefer NVIDIA or AMD
             if ($name -match "NVIDIA|GeForce|RTX|GTX|Quadro") {
                 $gpuName = $name
                 $gpuVramGb = [Math]::Max($gpuVramGb, $vram)
@@ -100,11 +100,11 @@ if (-not $gpuName) {
 }
 
 if (-not $gpuName) {
-    $gpuName = "Aucun GPU dédié détecté"
+    $gpuName = "No dedicated GPU detected"
     $gpuVramGb = 0.0
 }
 
-# 4. Calcul des scores partiels
+# 4. Compute partial scores
 function Calc-SubScore([double]$val, [double]$minVal, [double]$recVal) {
     if ($val -le $minVal) { return 0 }
     if ($val -ge $recVal) { return 100 }
@@ -122,7 +122,7 @@ $scorePercent = [int][Math]::Round(
 )
 $scorePercent = [Math]::Max(0, [Math]::Min(100, $scorePercent))
 
-# 5. Détermination du palier (Tier)
+# 5. Determine tier
 if ($scorePercent -ge 80) {
     $tier = "excellent"
     $recommended = $true
@@ -136,7 +136,7 @@ if ($scorePercent -ge 80) {
 
 $isoDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-# 6. Écriture du fichier INI (pour Inno Setup)
+# 6. Write INI file (for Inno Setup)
 if ($Ini) {
     $iniDir = Split-Path -Parent $Ini
     if ($iniDir -and -not (Test-Path $iniDir)) { New-Item -ItemType Directory -Path $iniDir -Force | Out-Null }

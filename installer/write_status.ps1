@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Écrit le fichier contrat ai_status.json consommé par le front-end CastoStudio.
+    Writes the ai_status.json contract file consumed by the CastoStudio frontend.
 
 .DESCRIPTION
-    Script PowerShell natif exécuté à la fin de l'installation par Inno Setup.
-    Écrit dans %ProgramData%\CastoStudio\ai_status.json
+    Native PowerShell script executed at the end of installation by Inno Setup.
+    Writes to %ProgramData%\CastoStudio\ai_status.json
 #>
 
 param(
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Report -or -not (Test-Path $Report)) {
-    Write-Error "Fichier rapport introuvable : $Report"
+    Write-Error "Report file not found: $Report"
     exit 1
 }
 
@@ -58,6 +58,6 @@ if (-not (Test-Path $dir)) {
 $statusJson = $statusObj | ConvertTo-Json -Depth 3
 Set-Content -Path $targetPath -Value $statusJson -Encoding UTF8
 
-Write-Host "Statut IA écris dans : $targetPath"
+Write-Host "AI status written to: $targetPath"
 Write-Output $statusJson
 exit 0

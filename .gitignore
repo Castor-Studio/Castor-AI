@@ -59,3 +59,7 @@ desktop.ini
 *.pt
 
 ai_analysis_pb2.py
+
+# Presentation and pitch assets
+castor_*.png
+PRICING_CARDS.md
