@@ -64,18 +64,21 @@ def test_ddt_audio_switching_backward_compatibility(host_meta, guest_meta, expec
 # the director must veto the switch and avoid cutting to an empty room!
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "guest_face_detected, guest_vol_db, expected_switch_allowed",
+    "guest_face_detected, guest_person_detected, guest_vol_db, expected_switch_allowed",
     [
         # Face is present and speaking -> switch allowed
-        ("true", "-16.0", True),
-        # No face metadata provided (audio-only fallback) -> switch allowed (never breaks legacy)
-        (None, "-16.0", True),
+        ("true", None, "-16.0", True),
+        # No face/person metadata provided (audio-only fallback) -> switch allowed (never breaks legacy)
+        (None, None, "-16.0", True),
         # Camera is empty (chair empty, noise like door slam or mic bump) -> VETOED!
-        ("false", "-16.0", False),
-        ("0", "-14.0", False),
+        ("false", None, "-16.0", False),
+        ("0", None, "-14.0", False),
+        (None, "false", "-15.0", False),
+        # Profile view / looking away: face not detected but person detected -> switch allowed!
+        ("false", "true", "-16.0", True),
     ],
 )
-def test_ddt_visual_presence_gating(guest_face_detected, guest_vol_db, expected_switch_allowed, make_module, monkeypatch):
+def test_ddt_visual_presence_gating(guest_face_detected, guest_person_detected, guest_vol_db, expected_switch_allowed, make_module, monkeypatch):
     clock = {"t": 0.0}
     monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
 
@@ -89,6 +92,8 @@ def test_ddt_visual_presence_gating(guest_face_detected, guest_vol_db, expected_
     guest_talking_meta = {"is_speaking": "true", "volume_db": guest_vol_db}
     if guest_face_detected is not None:
         guest_talking_meta["face_detected"] = guest_face_detected
+    if guest_person_detected is not None:
+        guest_talking_meta["person_detected"] = guest_person_detected
     guest_talking = Source(scene_id="s2_guest", url="rtmp://dummy/guest", label="Cam Invite", metadata=guest_talking_meta)
 
     wide = Source(scene_id="s3_wide", url="rtmp://dummy/wide", label="Plan Large")

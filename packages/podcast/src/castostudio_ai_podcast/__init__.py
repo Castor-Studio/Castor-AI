@@ -188,11 +188,16 @@ class PodcastModule(AiModule):
 
             # Visual presence check: if camera metadata explicitly indicates an empty chair,
             # veto the audio trigger to prevent cutting to an empty room.
+            # If person_detected is explicitly true, the speaker is present even if face is in profile.
             is_face_absent = False
             if source and source.metadata:
                 face_meta = source.metadata.get("face_detected", "").lower()
                 person_meta = source.metadata.get("person_detected", "").lower()
-                if face_meta in ("false", "0") or person_meta in ("false", "0"):
+                if person_meta in ("true", "1"):
+                    is_face_absent = False
+                elif person_meta in ("false", "0"):
+                    is_face_absent = True
+                elif face_meta in ("false", "0"):
                     is_face_absent = True
 
             volumes[role] = vol
