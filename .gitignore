@@ -31,7 +31,6 @@ htmlcov/
 .cache/
 
 # uv local files
-.python-version
 
 # Environment and local config
 .env

@@ -59,6 +59,24 @@ class ChunkBuffer:
         return chunks
 
 
+def is_device_url(url: str) -> tuple[bool, str, str]:
+    """Check if URL targets a local hardware capture device (AVFoundation, DShow, ALSA, V4L2)."""
+    device_prefixes = ("avfoundation", "dshow", "v4l2", "alsa")
+    for prefix in device_prefixes:
+        if url.startswith(f"{prefix}:"):
+            fmt, _, dev = url.partition(":")
+            return True, fmt, dev
+
+    if url.startswith(":") or (
+        len(url.split(":")) == 2 and url.split(":")[0].isdigit() and url.split(":")[1].isdigit()
+    ):
+        import sys
+        if sys.platform == "darwin":
+            return True, "avfoundation", url
+
+    return False, "", ""
+
+
 class AudioStreamReader:
     """Reads one audio source, feeding a VAD tracker and exposing is_speaking/volume."""
 
@@ -111,6 +129,74 @@ class AudioStreamReader:
             return self._is_speaking
 
     def _run(self):
+        is_dev, fmt, dev = is_device_url(self.url)
+        if is_dev:
+            self._run_device_pipe(fmt, dev)
+        else:
+            self._run_pyav()
+
+    def _run_device_pipe(self, fmt: str, dev: str) -> None:
+        """Stream raw 16kHz PCM audio directly from hardware device via ffmpeg pipe."""
+        import subprocess
+
+        bytes_per_chunk = VAD_CHUNK_SAMPLES * 2  # 512 samples * 2 bytes = 1024 bytes
+
+        while self.running:
+            proc = None
+            try:
+                cmd = [
+                    "ffmpeg",
+                    "-loglevel", "error",
+                    "-f", fmt,
+                    "-i", dev,
+                    "-f", "s16le",
+                    "-ar", str(VAD_SAMPLE_RATE),
+                    "-ac", "1",
+                    "pipe:1",
+                ]
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.failures = 0
+                self._tracker.reset()
+                self._buffer = ChunkBuffer()
+
+                while self.running:
+                    raw = proc.stdout.read(bytes_per_chunk)
+                    if not raw or len(raw) < bytes_per_chunk:
+                        break
+
+                    pcm16 = np.frombuffer(raw, dtype=np.int16)
+                    samples = pcm16_to_float32(pcm16)
+                    for chunk in self._buffer.push(samples):
+                        rms = float(np.sqrt(np.mean(chunk**2)))
+                        speaking = self._tracker.process_chunk(chunk)
+                        with self.lock:
+                            self.latest_db = rms_to_db(rms)
+                            self._is_speaking = speaking
+
+                if proc:
+                    proc.terminate()
+                    proc.wait(timeout=0.5)
+
+            except Exception as exc:
+                self.failures += 1
+                LOGGER.warning(
+                    "Error reading device audio for %s (fail count: %d): %s",
+                    self.label,
+                    self.failures,
+                    exc,
+                )
+                if proc:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                with self.lock:
+                    self._is_speaking = False
+                backoff = min(INITIAL_BACKOFF_SEC * (2 ** (self.failures - 1)), MAX_BACKOFF_SEC)
+                time.sleep(backoff)
+
+    def _run_pyav(self) -> None:
+        """Stream audio using PyAV for network streams and local files."""
         while self.running:
             container = None
             try:
@@ -124,7 +210,6 @@ class AudioStreamReader:
 
                 audio_stream = audio_streams[0]
                 self.failures = 0
-                # Fresh connection: previous stream's VAD state/partial chunk no longer apply.
                 self._tracker.reset()
                 self._buffer = ChunkBuffer()
                 resampler = av.AudioResampler(format="s16", layout="mono", rate=VAD_SAMPLE_RATE)
