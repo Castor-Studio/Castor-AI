@@ -12,6 +12,10 @@ ENV/
 # Build artifacts
 build/
 dist/
+installer/build/
+installer/dist/
+installer/output/
+installer/cache/
 *.egg-info/
 .eggs/
 *.egg
@@ -55,3 +59,7 @@ desktop.ini
 *.pt
 
 ai_analysis_pb2.py
+
+# Presentation and pitch assets
+castor_*.png
+PRICING_CARDS.md
