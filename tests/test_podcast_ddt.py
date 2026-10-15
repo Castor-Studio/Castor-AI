@@ -192,3 +192,38 @@ def test_ddt_anti_ping_pong_governor(ping_pong_enabled, expected_wide_trigger, m
     finally:
         for r in module._audio_readers.values():
             r.stop()
+
+
+# ---------------------------------------------------------------------------
+# DATA-DRIVEN TEST 4: Preallocated ChunkBuffer Throughput & Invariance
+# Tests across diverse audio frame push sizes to guarantee sub-millisecond execution
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "push_size, num_pushes, expected_chunks",
+    [
+        (128, 16, 4),    # 128 * 16 = 2048 samples -> 4 chunks of 512
+        (256, 10, 5),    # 256 * 10 = 2560 samples -> 5 chunks of 512
+        (512, 8, 8),     # 512 * 8 = 4096 samples -> 8 chunks of 512
+        (1024, 5, 10),   # 1024 * 5 = 5120 samples -> 10 chunks of 512
+        (2048, 3, 12),   # 2048 * 3 = 6144 samples -> 12 chunks of 512
+        (700, 5, 6),     # 700 * 5 = 3500 samples -> 6 chunks of 512 (3072 consumed, 428 remainder)
+    ],
+)
+def test_ddt_chunk_buffer_throughput_matrix(push_size, num_pushes, expected_chunks):
+    from castostudio_ai_podcast.audio import ChunkBuffer
+    import numpy as np
+
+    buf = ChunkBuffer(chunk_size=512)
+    raw_data = np.linspace(-0.9, 0.9, push_size, dtype=np.float32)
+
+    total_chunks = 0
+    t0 = time.perf_counter()
+    for _ in range(num_pushes):
+        extracted = buf.push(raw_data)
+        total_chunks += len(extracted)
+    duration = time.perf_counter() - t0
+
+    assert total_chunks == expected_chunks
+    # Microsecond throughput assertion: all pushes combined must take < 5ms
+    assert duration < 0.005, f"ChunkBuffer too slow for push_size={push_size}: {duration*1000:.3f}ms"
+

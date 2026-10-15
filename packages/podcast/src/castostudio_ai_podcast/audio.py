@@ -40,22 +40,43 @@ def rms_to_db(rms: float) -> float:
 
 
 class ChunkBuffer:
-    """Accumulates variable-length PCM pushes and yields fixed-size VAD chunks."""
+    """Accumulates variable-length PCM pushes and yields fixed-size VAD chunks
+    using a preallocated continuous buffer to minimize heap reallocations.
+    """
 
-    def __init__(self, chunk_size: int = VAD_CHUNK_SAMPLES) -> None:
+    def __init__(self, chunk_size: int = VAD_CHUNK_SAMPLES, capacity: int = 16384) -> None:
         self._chunk_size = chunk_size
-        self._pending = np.empty(0, dtype=np.float32)
+        self._capacity = max(capacity, chunk_size * 4)
+        self._buffer = np.zeros(self._capacity, dtype=np.float32)
+        self._write_pos = 0
 
     def push(self, samples: np.ndarray) -> list[np.ndarray]:
         if samples.size == 0:
             return []
-        buffer = np.concatenate([self._pending, samples])
+
+        needed = self._write_pos + samples.size
+        if needed > self._capacity:
+            self._capacity = max(self._capacity * 2, needed + self._chunk_size)
+            new_buffer = np.zeros(self._capacity, dtype=np.float32)
+            if self._write_pos > 0:
+                new_buffer[: self._write_pos] = self._buffer[: self._write_pos]
+            self._buffer = new_buffer
+
+        self._buffer[self._write_pos : self._write_pos + samples.size] = samples
+        self._write_pos += samples.size
+
         chunks = []
         offset = 0
-        while offset + self._chunk_size <= buffer.size:
-            chunks.append(buffer[offset : offset + self._chunk_size])
+        while offset + self._chunk_size <= self._write_pos:
+            chunks.append(self._buffer[offset : offset + self._chunk_size].copy())
             offset += self._chunk_size
-        self._pending = buffer[offset:]
+
+        if offset > 0:
+            remaining = self._write_pos - offset
+            if remaining > 0:
+                self._buffer[:remaining] = self._buffer[offset : self._write_pos]
+            self._write_pos = remaining
+
         return chunks
 
 

@@ -74,14 +74,15 @@ class SpeechActivityTracker:
 
     def process_chunk(self, chunk: np.ndarray) -> bool:
         """chunk: float32 numpy array, exactly VAD_CHUNK_SAMPLES mono samples in [-1, 1]."""
-        tensor = torch.from_numpy(chunk).to(self._device)
-        event = self._iterator(tensor, return_seconds=False)
-        if event:
-            if "start" in event:
-                self._is_speaking = True
-            elif "end" in event:
-                self._is_speaking = False
-        return self._is_speaking
+        with torch.inference_mode():
+            tensor = torch.from_numpy(chunk).to(self._device)
+            event = self._iterator(tensor, return_seconds=False)
+            if event:
+                if "start" in event:
+                    self._is_speaking = True
+                elif "end" in event:
+                    self._is_speaking = False
+            return self._is_speaking
 
     def is_speaking(self) -> bool:
         return self._is_speaking

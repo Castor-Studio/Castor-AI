@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import lru_cache
 import logging
 import re
 import time
@@ -24,6 +25,7 @@ _NUMBERED_GUEST_RE = re.compile(
 )
 
 
+@lru_cache(maxsize=128)
 def _classify_speaker_label(label: str) -> str | None:
     """Maps a camera label to a canonical speaker role: "host", "guest"
     (first/only guest), or "guest2", "guest3", ... for additional panelists.
@@ -149,8 +151,8 @@ class PodcastModule(AiModule):
         if not sources:
             return None
 
-        # Delegate the parsing and state machine to thread for safe execution
-        return await asyncio.to_thread(self._analyze_sync, sources)
+        # Execute high-performance synchronous state machine directly without thread pool overhead
+        return self._analyze_sync(sources)
 
     def _analyze_sync(self, sources: Sequence[Source]) -> SceneDecision | None:
         now = time.monotonic()
